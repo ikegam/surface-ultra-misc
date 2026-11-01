@@ -1,0 +1,124 @@
+# surface-ultra-misc
+
+(日本語: [README_jp.md](README_jp.md))
+
+Small pieces for running Linux on the Microsoft Surface Laptop Ultra (NVIDIA N1X SoC, arm64).
+The camera lives in its own repository, [surface-ultra-camera](https://github.com/ikegam/surface-ultra-camera).
+
+Unofficial; not affiliated with Microsoft, NVIDIA or MediaTek. Tested on Omarchy (linux-omarchy 7.3).
+
+## Credits
+
+This builds on teo-casares' work bringing Omarchy up on this machine:
+[the Gist](https://gist.github.com/teo-casares/8b64949638e1952602a7f435bb34d5b8) (kernel patches, DKMS modules,
+services) and [omacom/omarchy discussion #15885](https://github.com/omacom/omarchy/discussions/15885).
+Start there; the pieces below assume that setup.
+
+| Directory | What | Relation to teo-casares' work |
+|---|---|---|
+| [`als/`](#als-ambient-light-sensor) | ambient light sensor driver | independent |
+| [`thermal/`](#thermal-power-and-skin-temperature-control) | SoC power / skin temperature control, Tj safety net | independent; complements their fan daemon, and reads the SSAM temperature sensors registered by `ssam-helper` |
+| [`ssam-helper/`](#ssam-helper-stock-ssam-without-patched-modules) | stock SSAM + helper modules | **their approach** (described in the discussion), implemented independently |
+| [`backlight/`](#backlight-automatic-brightness) | automatic brightness | **a patch to their `n1x-edp-backlight`** (the script is not copied here) |
+
+## als: ambient light sensor
+
+Exposes the ambient light sensor as the IIO device `als`:
+
+```
+$ cat /sys/bus/iio/devices/iio:device0/name
+als
+$ cat /sys/bus/iio/devices/iio:device0/in_illuminance_raw    # units of 0.01 lux
+36180
+```
+
+Chromaticity (x, y) is reported too. Color temperature stays 0 (the sensor hub firmware does not fill it in).
+
+**How it works.** The sensor (ams TCS3430) sits behind a sensor hub that runs as firmware on the SoC's SCP
+coprocessor. The SCP acts as an SPI slave on SPI3 and is an ACPI HID-over-SPI device: `\_SB.SENH`
+(`MSFW1111`, `_CID PNP0C51`). The kernel's HID-over-SPI driver (the spi-hid series that linux-omarchy carries;
+`CONFIG_SPI_HID_ACPI` is not enabled there) does not work as is, so core and ACPI glue are built out of tree
+as one module, `n1x-spi-hid`, with three fixes:
+
+1. **The reset was never sent.** `spi-hid-acpi` calls `device_reset(&adev->dev)`, but the `struct device`
+   inside an `acpi_device` has no ACPI handle, so `_RST` never runs (and the error is ignored). `_RST` is now
+   evaluated directly. On this machine it rings a doorbell to the sensor hub firmware.
+2. **The interrupt line has no GPIO.** The `GpioInt` is pin 190, an EINT-only line: `pinctrl-mt8901` only has
+   GPIOs 0-181, so the ACPI IRQ lookup fails, and `mtk-eint` would refuse `request_irq()` because it locks the
+   matching GPIO. The module takes over EINT 190's flow handler and forwards it to an irq_sim interrupt
+   (a reset response that arrives while the interrupt is disabled is kept by genirq and resent).
+3. **A one-shot read of an input report returned the feature report.** `spi_hid_ll_raw_request()` always sends
+   GET_FEATURE, so `hid-sensor-hub`'s sync read parsed settings as the illuminance. Input-report requests now
+   fail, and `hid-sensor-hub` takes the next periodic report (every 750 ms).
+
+The core exports no symbols and uses its own trace system name, so it neither replaces nor collides with the
+stock `spi-hid`.
+
+```
+cd als
+sudo ./install.sh     # DKMS, loaded right away and at every boot; no reboot
+sudo ./uninstall.sh
+```
+
+`als/scp-peek.py` (root, read-only) prints how many reset doorbells the SCP has taken and the tail of the SCP
+firmware log; useful when the device does not appear.
+
+## thermal: power and skin temperature control
+
+Linux does nothing here by default: none of the ACPI thermal zones has a trip point, and under a sustained CPU
+load the SoC draws 64-68 W with Tj pinned at the firmware's ~98 C. On Windows the thermal policy (MPTF) keeps
+the *skin* temperature (SAM sensor VTS1) at 45 C by lowering the SoC's sustained power limit: 55 W on AC,
+42.5 W on battery in the default mode. This directory does the same with the knobs Linux has.
+
+- **`n1x-thermald`** (systemd service, python3 standard library only): every 2 s it compares the averaged SoC
+  power with the budget and moves every CPU's `scaling_max_freq` in 5 % steps (floor 40 %). A PI loop on the
+  skin temperature (VTS1 = `surface_thermal` temp9, target 45 C; VTS5 = temp12, target 51 C) lowers the budget.
+  Emergency: secondary skin >= 55.5 C or battery (RTS5 = temp5) >= 62 C pins the CPUs to their minimum,
+  57 C / 64 C powers off. These are Windows' values. Without the SSAM sensors it runs on the power budget alone.
+- **Tj safety net**: an extra ACPI thermal zone `\_TZ.NXTJ` (`n1x-thermal.asl`) on the SoC Tj, passive at
+  100 C on all 20 CPUs, critical at 105 C. `n1x-thermal-ssdt.service` loads it through `acpi_configfs` at boot.
+
+Two of the ACPI "thermal zones" are not temperatures: `\_TZ.PSOC` (thermal_zone2) and `\_TZ.PSYS`
+(thermal_zone1) report averaged SoC and system power in mW, which is why they read "2005 C" and similar.
+`n1x-thermald` uses PSOC as its power feedback.
+
+Measured with a 19-thread load: SoC power 65 W -> 52 W, Tj 98 C -> 94 C, and back to full speed in steps once
+the load stops.
+
+```
+cd thermal
+sudo ./install.sh          # includes a selftest that the frequency cap really slows a CPU
+./n1x-thermald --dry-run   # print decisions only, any user
+cat /run/n1x-thermald/status.json
+```
+
+The fan is left to the EC (or to teo-casares' fan daemon); `n1x-thermald` does not touch it.
+
+## ssam-helper: stock SSAM without patched modules
+
+Patched copies of in-tree SSAM modules break on kernel updates. As teo-casares described in the discussion,
+the stock modules work with two small helpers, implemented here as new modules that shadow nothing:
+
+- `n1x_ssam_uartclk`: sets the real 52 MHz clock of the SAM UART (NVDA0240) before `surface_aggregator` opens
+  it, and corrects the fractional divider that `mtk8250_set_termios()` gets wrong above 42.9 MHz (32-bit overflow).
+- `n1x_ssam_clients`: a platform hub for MSHW0733 that registers battery, AC, the 11 SSAM temperature sensors
+  (`surface_temp`, hwmon `surface_thermal`, tempN = SAM instance N) and fan speed (`surface_fan`).
+  `profile=1` also registers the platform profile device (experimental: this EC reads back profile 0).
+
+```
+cd ssam-helper
+sudo ./install.sh      # replaces an installed surface-n1x-ssam/1.0 live; no reboot
+sudo ./rollback.sh     # back to surface-n1x-ssam/1.0
+```
+
+## backlight: automatic brightness
+
+`backlight/n1x-edp-backlight-auto.patch` adds automatic brightness to teo-casares' `n1x-edp-backlight` (get the
+script from their Gist; the patch header has the commands). It follows Windows' lux -> nits curve for this
+machine using `als`; a brightness key press is kept as an offset on top of the curve and saved across restarts;
+`echo 0 > /var/lib/n1x-edp-backlight/auto` turns it off.
+
+## License
+
+GPL-2.0 (see LICENSE). The spi-hid sources in `als/` come from the spi-hid series carried by linux-omarchy
+(Microsoft, Google, Semihalf and others); each modified file says what was changed.

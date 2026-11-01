@@ -20,6 +20,8 @@ teo-casares さんによる、この機種で Omarchy を動かす取り組み�
 | `thermal/` | SoC 電力・表面温度の制御、Tj の安全網 | 独立。teo さんのファン制御デーモンを補うもので、`ssam-helper` が登録する SSAM 温度センサーを読む |
 | `ssam-helper/` | 標準 SSAM + 補助モジュール | **teo さんが discussion で示した方式**を独自に実装したもの |
 | `backlight/` | 自動輝度 | **teo さんの `n1x-edp-backlight` へのパッチ**(スクリプト本体はここには入れていない) |
+| `power-button/` | 電源ボタンのドライバ | 独立したドライバ。phantom の「音量下げ」(浮いた `MSHW0040` のピン)の原因は teo さんが見つけたもの |
+| `usb4/` | USB4 のトンネル用ポートを止めない設定 | **teo さんが discussion で示した方式**を独自に実装したもの |
 
 ## als: 照度センサー
 
@@ -118,6 +120,42 @@ sudo ./rollback.sh     # surface-n1x-ssam/1.0 に戻す
 (スクリプトは teo さんの Gist から取ってください。手順はパッチの先頭にあります)。`als` を使ってこの機種用の Windows の
 lux → nits 曲線に追従します。輝度キーで調整した分は曲線へのオフセットとして保存され、再起動後も残ります。
 `echo 0 > /var/lib/n1x-edp-backlight/auto` で自動輝度を止められます。
+
+## power-button: 電源ボタン
+
+電源ボタンを使えるようにします。短く押すと `KEY_POWER` が送られ、Omarchy の電源メニューが開きます。
+
+ボタンは ACPI の `MSHW0040`(`\_SB.MSBT`)の向こうにあります。x86 の Surface では `soc_button_array` がこれを gpio-keys
+にしますが、`soc_button_array` は x86 専用なので、この機種では電源ボタンにドライバがありません。`_CRS` には
+`\_SB.GIO0` の GPIO が 3 本あり、46 番が電源(復帰の要因として指定されているのはこれだけ)、残りが 40・41 番です。
+この機種には音量ボタンがなく、teo-casares さんが見つけたとおり 40・41 番は浮いていて「音量下げ」を押しっぱなしと報告
+します。`n1x-power-button` は `MSHW0040` に対応し、46 番だけを使って 40・41 番には触りません。そのため
+`modprobe.blacklist=gpio_keys` は起動オプションに残したままで構いません。読み込んだ時点の値を「離している」とみなします。
+サスペンド中に押すと復帰しますが、キーは送らないので、復帰後に電源メニューは開きません。
+
+```
+cd power-button
+sudo ./install.sh      # DKMS に入れてすぐ読み込む。次回からは起動時に自動。再起動不要
+sudo ./uninstall.sh
+```
+
+ボタンでのサスペンドからの復帰はまだ試していません。
+
+## usb4: ドック
+
+USB4 / Thunderbolt のドックを使うには、USB4 のトンネル用ルートポート 3 つ(`10de:22cf`)を省電力で止めないようにする
+必要があります(teo-casares さんが Thunderbolt ドックで確認)。`usb4/75-n1x-usb4-tunnel-pm.rules` がこれらに
+`power/control=on` を設定します。teo さんの設定のもう一方の `power_wrap_drv.usb4_release=0` は、linux-omarchy 7.3 では
+N1X の既定値になっています。ドックを挿したままだとサスペンドに失敗した例があるそうなので、サスペンド前にはドックを
+抜いてください。
+
+```
+cd usb4
+sudo ./install.sh      # すぐ効く。再起動不要
+sudo ./uninstall.sh
+```
+
+ここではドックでの確認はしていません。
 
 ## ライセンス
 

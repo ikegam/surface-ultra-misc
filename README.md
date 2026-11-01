@@ -20,6 +20,8 @@ Start there; the pieces below assume that setup.
 | [`thermal/`](#thermal-power-and-skin-temperature-control) | SoC power / skin temperature control, Tj safety net | independent; complements their fan daemon, and reads the SSAM temperature sensors registered by `ssam-helper` |
 | [`ssam-helper/`](#ssam-helper-stock-ssam-without-patched-modules) | stock SSAM + helper modules | **their approach** (described in the discussion), implemented independently |
 | [`backlight/`](#backlight-automatic-brightness) | automatic brightness | **a patch to their `n1x-edp-backlight`** (the script is not copied here) |
+| [`power-button/`](#power-button) | power button driver | independent driver; the cause of the phantom "Volume Down" (floating `MSHW0040` pins) was found by them |
+| [`usb4/`](#usb4-docks) | keeps the USB4 tunnel ports awake | **their approach** (described in the discussion), implemented independently |
 
 ## als: ambient light sensor
 
@@ -122,6 +124,41 @@ sudo ./rollback.sh     # back to surface-n1x-ssam/1.0
 script from their Gist; the patch header has the commands). It follows Windows' lux -> nits curve for this
 machine using `als`; a brightness key press is kept as an offset on top of the curve and saved across restarts;
 `echo 0 > /var/lib/n1x-edp-backlight/auto` turns it off.
+
+## power-button
+
+Makes the power button work. A short press sends `KEY_POWER`, which opens Omarchy's power menu.
+
+The buttons are behind ACPI `MSHW0040` (`\_SB.MSBT`). On x86 Surfaces `soc_button_array` turns that into
+gpio-keys devices, but `soc_button_array` is x86-only, so on this machine the power button has no driver. Its `_CRS`
+has three GPIOs on `\_SB.GIO0`: pin 46 (power, the only one marked as a wake source) and pins 40/41. This laptop has
+no volume rocker; as teo-casares found, 40/41 float and report "Volume Down" held forever. `n1x-power-button` binds
+to `MSHW0040`, takes only pin 46 and leaves 40/41 alone, so `modprobe.blacklist=gpio_keys` can stay on the kernel
+command line. The level at load time counts as released. A press during suspend wakes the machine but is not
+reported, so the power menu does not open after resume.
+
+```
+cd power-button
+sudo ./install.sh      # DKMS, loaded at once and at every boot; no reboot
+sudo ./uninstall.sh
+```
+
+Waking from suspend with the button has not been tested yet.
+
+## usb4: docks
+
+USB4 / Thunderbolt docks need the three USB4 tunnel root ports (`10de:22cf`) kept out of runtime suspend
+(teo-casares, tested with a Thunderbolt dock). `usb4/75-n1x-usb4-tunnel-pm.rules` sets `power/control=on` on them.
+The other part of their setup, `power_wrap_drv.usb4_release=0`, is already the default for N1X on linux-omarchy 7.3.
+They also saw suspend fail in one boot with a dock attached, so unplug the dock before suspending.
+
+```
+cd usb4
+sudo ./install.sh      # applies at once; no reboot
+sudo ./uninstall.sh
+```
+
+Not tested with a dock here.
 
 ## License
 

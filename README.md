@@ -143,7 +143,9 @@ sudo ./install.sh      # DKMS, loaded at once and at every boot; no reboot
 sudo ./uninstall.sh
 ```
 
-Waking from suspend with the button has not been tested yet.
+Waking from suspend with the button works (tested with the lid open). If the machine sleeps with the lid closed, also
+turn off the button's wakeup (`/sys/bus/platform/devices/MSHW0040:00/power/wakeup`), as for the keyboard and touchpad;
+otherwise a press in a bag wakes it.
 
 ## usb4: docks
 

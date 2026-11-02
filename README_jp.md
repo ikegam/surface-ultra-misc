@@ -22,6 +22,8 @@ teo-casares さんによる、この機種で Omarchy を動かす取り組み�
 | `backlight/` | 自動輝度 | **teo さんの `n1x-edp-backlight` へのパッチ**(スクリプト本体はここには入れていない) |
 | `power-button/` | 電源ボタンのドライバ | 独立したドライバ。phantom の「音量下げ」(浮いた `MSHW0040` のピン)の原因は teo さんが見つけたもの |
 | `usb4/` | USB4 のトンネル用ポートを止めない設定 | **teo さんが discussion で示した方式**を独自に実装したもの |
+| `suspend/` | ふたを閉じたときの誤復帰の防止、復帰直後にキーが効かない問題 | ふた閉じのフックは **teo さんが discussion で示した方式**を独自に実装し、タッチパッドと電源ボタンを足したもの。NVIDIA の部分は独立 |
+| `keyboard/` | Caps Lock の遅れ、キー再マップでの連打 | 独立 |
 
 ## als: 照度センサー
 
@@ -141,7 +143,7 @@ sudo ./uninstall.sh
 
 ボタンでサスペンドから復帰できます(ふたを開けた状態で確認)。ふたを閉じてサスペンドする場合は、キーボードやタッチパッドと
 同じように、ボタンの wakeup(`/sys/bus/platform/devices/MSHW0040:00/power/wakeup`)も止めてください。止めないと、
-カバンの中で押されて起きてしまいます。
+カバンの中で押されて起きてしまいます。`suspend/` のフックがこれを行います。
 
 ## usb4: ドック
 
@@ -158,6 +160,46 @@ sudo ./uninstall.sh
 ```
 
 ここではドックでの確認はしていません。
+
+## suspend: サスペンドと復帰
+
+**ふたを閉じたときの誤復帰。** カバンの中でキーが押されると、I2C キーボード(`MSHW0794`)の割り込みで s2idle から起きて
+しまいます(teo-casares さんが discussion で報告し、system-sleep のフックで対処しています)。`surface-ultra-lid-wakeup` は
+同じ方式を独自に実装したもので、キーボードに加えてタッチパッド(`MSHW0734`)と電源ボタン(`MSHW0040`、`power-button/`)の
+wakeup も、ふたが閉じているときだけ止め、復帰時に戻します。ふたを開けたままのサスペンドは、従来どおりキーやボタンで
+復帰できます。
+
+**復帰直後の 10〜30 秒、キーが効かない。** `nvidia-suspend.service` と `nvidia-resume.service` が実行する
+`nvidia-sleep.sh` は、サスペンド前に `chvt 63` で VT を切り替え、復帰後に元の VT へ戻します。Hyprland はそのたびに seat を
+無効化・有効化して入力機器をすべて登録し直すので(hyprland.log の `Disabling seat` / `Enabling seat`)、その間はロック画面に
+キーが届きません。キーボードや I2C は正常です。ドライバが `NVreg_UseKernelSuspendNotifiers=1` で動いていれば、VRAM の
+退避はカーネルのサスペンド通知の中で行われるので、この 2 つのサービスは不要です。マスクすると、復帰直後からキーが効きます
+(ロック画面のパスワード欄にフォーカスが入らず、1 回クリックが要ることがあります。これは別の問題で未解決です)。
+`NVreg_EnableS0ixPowerManagement=1`(s2idle 復帰後に画面を戻すため。teo さんの discussion を参照)は前提です。
+
+```
+cd suspend
+sudo ./install.sh                       # フックだけ。次のサスペンドから有効
+sudo ./install.sh --mask-nvidia-sleep   # 加えて nvidia-suspend/resume をマスク(ドライバ設定を確認してから)
+sudo ./uninstall.sh
+```
+
+## keyboard: Caps Lock の遅れ
+
+内蔵キーボードの LED は HID over I2C の遅い書き込みの向こうにあり、LED のトリガー `kbd-capslock` がキー状態に連動して
+書き込むたびに Caps Lock の処理自体が遅れます。`73-surface-capslock-led.rules` は内蔵キーボードの Caps Lock LED の
+トリガーを `none` にします。LED は点かなくなりますが、遅れはなくなります。
+
+```
+cd keyboard
+sudo ./install.sh      # すぐ効く。再起動不要
+sudo ./uninstall.sh
+```
+
+**キー再マップを挟むと連打になる。** この機種のキーボードは、キーを離した報告がまれに大きく遅れ(数百 ms)、次のキーを
+押した報告の約 15 ms 前にようやく届きます(原因は調査中。GPIO の割り込み EINT 139 の扱いを疑っています)。キーボードの生の入力を記録すると
+20 ms 未満の押下は 1 回もありませんでしたが、keyd を通した仮想キーボードでは 3〜17 ms の押下が何回も出ていて、連打に
+見えていました。Caps→Ctrl などは keyd を使わず、Hyprland の `kb_options = ctrl:nocaps` やキー割り当てで行うのが安全です。
 
 ## ライセンス
 

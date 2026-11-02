@@ -22,6 +22,8 @@ Start there; the pieces below assume that setup.
 | [`backlight/`](#backlight-automatic-brightness) | automatic brightness | **a patch to their `n1x-edp-backlight`** (the script is not copied here) |
 | [`power-button/`](#power-button) | power button driver | independent driver; the cause of the phantom "Volume Down" (floating `MSHW0040` pins) was found by them |
 | [`usb4/`](#usb4-docks) | keeps the USB4 tunnel ports awake | **their approach** (described in the discussion), implemented independently |
+| [`suspend/`](#suspend-sleep-and-resume) | no wakeups with the lid closed; keys dead right after resume | the lid hook is **their approach** (described in the discussion), implemented independently, with the touchpad and power button added; the NVIDIA part is independent |
+| [`keyboard/`](#keyboard-caps-lock-lag) | Caps Lock lag; repeated keys through a key remapper | independent |
 
 ## als: ambient light sensor
 
@@ -145,7 +147,7 @@ sudo ./uninstall.sh
 
 Waking from suspend with the button works (tested with the lid open). If the machine sleeps with the lid closed, also
 turn off the button's wakeup (`/sys/bus/platform/devices/MSHW0040:00/power/wakeup`), as for the keyboard and touchpad;
-otherwise a press in a bag wakes it.
+otherwise a press in a bag wakes it. The hook in `suspend/` does this.
 
 ## usb4: docks
 
@@ -161,6 +163,48 @@ sudo ./uninstall.sh
 ```
 
 Not tested with a dock here.
+
+## suspend: sleep and resume
+
+**Wakeups with the lid closed.** Keys pressed in a bag wake the machine from s2idle through the I2C keyboard
+(`MSHW0794`) interrupt (reported by teo-casares in the discussion, who handles it with a system-sleep hook).
+`surface-ultra-lid-wakeup` is an independent implementation of the same approach. Besides the keyboard, it also turns
+off wakeup for the touchpad (`MSHW0734`) and the power button (`MSHW0040`, `power-button/`), only while the lid is
+closed, and turns it back on at resume. With the lid open, keys and the button still wake the machine.
+
+**Keys dead for 10-30 s right after resume.** `nvidia-sleep.sh`, run by `nvidia-suspend.service` and
+`nvidia-resume.service`, switches to VT 63 (`chvt 63`) before suspend and back after resume. Each time, Hyprland
+disables and re-enables the seat and adds every input device again (`Disabling seat` / `Enabling seat` in
+hyprland.log), and the lock screen gets no keys until that is done. The keyboard and I2C are fine. When the driver
+runs with `NVreg_UseKernelSuspendNotifiers=1`, VRAM is saved from the kernel suspend notifiers, so the two services
+are not needed. With them masked, keys work right after resume. (The lock screen's password field may still need one
+click for focus; that is a separate, unsolved problem.) `NVreg_EnableS0ixPowerManagement=1` (to bring the display
+back after s2idle; see teo-casares' discussion) is assumed.
+
+```
+cd suspend
+sudo ./install.sh                       # hook only; applies from the next suspend
+sudo ./install.sh --mask-nvidia-sleep   # also mask nvidia-suspend/resume (checks the driver settings first)
+sudo ./uninstall.sh
+```
+
+## keyboard: Caps Lock lag
+
+The built-in keyboard's LED sits behind slow HID-over-I2C writes, and every write made by the `kbd-capslock` LED
+trigger to follow the key state delays Caps Lock itself. `73-surface-capslock-led.rules` sets the trigger of the
+built-in keyboard's Caps Lock LED to `none`. The LED no longer lights, but the lag is gone.
+
+```
+cd keyboard
+sudo ./install.sh      # applies at once; no reboot
+sudo ./uninstall.sh
+```
+
+**Repeated keys through a key remapper.** On this keyboard a key release sometimes arrives very late (hundreds of
+ms), only about 15 ms before the next key press (cause under investigation; the handling of GPIO interrupt EINT 139 is
+suspected). A raw capture of the keyboard had no press shorter than 20 ms, but keyd's virtual keyboard showed several
+3-17 ms presses, which looked like repeated keys. Do remaps such as Caps→Ctrl with Hyprland (`kb_options =
+ctrl:nocaps`, key bindings) instead of keyd.
 
 ## License
 

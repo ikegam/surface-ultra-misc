@@ -42,7 +42,7 @@ Chromaticity (x, y) is reported too. Color temperature stays 0 (the sensor hub f
 coprocessor. The SCP acts as an SPI slave on SPI3 and is an ACPI HID-over-SPI device: `\_SB.SENH`
 (`MSFW1111`, `_CID PNP0C51`). The kernel's HID-over-SPI driver (the spi-hid series that linux-omarchy carries;
 `CONFIG_SPI_HID_ACPI` is not enabled there) does not work as is, so core and ACPI glue are built out of tree
-as one module, `n1x-spi-hid`, with three fixes:
+as one module, `n1x-spi-hid`, with four fixes:
 
 1. **The reset was never sent.** `spi-hid-acpi` calls `device_reset(&adev->dev)`, but the `struct device`
    inside an `acpi_device` has no ACPI handle, so `_RST` never runs (and the error is ignored). `_RST` is now
@@ -54,6 +54,10 @@ as one module, `n1x-spi-hid`, with three fixes:
 3. **A one-shot read of an input report returned the feature report.** `spi_hid_ll_raw_request()` always sends
    GET_FEATURE, so `hid-sensor-hub`'s sync read parsed settings as the illuminance. Input-report requests now
    fail, and `hid-sensor-hub` takes the next periodic report (every 750 ms).
+4. **Sometimes silent after resume.** After some s2idle resumes the sensor hub sends nothing at all, not even
+   the reset response, and every later report is dropped ("HID not ready"): the illuminance stays 0 and
+   automatic brightness stops until the driver is rebound. If no interrupt arrives within 3 s of resume, the
+   driver now resets the sensor hub again (up to 3 times) and logs `sensor hub silent after resume`.
 
 The core exports no symbols and uses its own trace system name, so it neither replaces nor collides with the
 stock `spi-hid`.
@@ -125,7 +129,9 @@ sudo ./rollback.sh     # back to surface-n1x-ssam/1.0
 `backlight/n1x-edp-backlight-auto.patch` adds automatic brightness to teo-casares' `n1x-edp-backlight` (get the
 script from their Gist; the patch header has the commands). It follows Windows' lux -> nits curve for this
 machine using `als`; a brightness key press is kept as an offset on top of the curve and saved across restarts;
-`echo 0 > /var/lib/n1x-edp-backlight/auto` turns it off.
+`echo 0 > /var/lib/n1x-edp-backlight/auto` turns it off. When the level is put back at start-up or after the
+panel lost it in s2idle, it fades there over about 0.3 s instead of jumping (the firmware leaves the panel at
+another level, so the change was visible at every boot and resume).
 
 ## power-button
 

@@ -41,7 +41,7 @@ $ cat /sys/bus/iio/devices/iio:device0/in_illuminance_raw    # 0.01 lux 単位
 **仕組み。** センサー(ams TCS3430)は、SoC 内のサブプロセッサ SCP の上で動くセンサーハブの向こうにあります。
 SCP は SPI3 のスレーブとして HID over SPI のデバイスになり、ACPI では `\_SB.SENH`(`MSFW1111`、`_CID PNP0C51`)です。
 カーネルの HID over SPI ドライバ(linux-omarchy が取り込んでいる spi-hid パッチ群。`CONFIG_SPI_HID_ACPI` は無効)は
-そのままでは動かないので、本体と ACPI 部分を 1 つのモジュール `n1x-spi-hid` として外部ビルドし、次の 3 点を直しています。
+そのままでは動かないので、本体と ACPI 部分を 1 つのモジュール `n1x-spi-hid` として外部ビルドし、次の 4 点を直しています。
 
 1. **リセットが送られていなかった。** `spi-hid-acpi` は `device_reset(&adev->dev)` を呼びますが、`acpi_device` の中の
    `struct device` には ACPI ハンドルが無いので `_RST` は実行されません(エラーも無視されます)。`_RST` を直接評価する
@@ -53,6 +53,10 @@ SCP は SPI3 のスレーブとして HID over SPI のデバイスになり、AC
 3. **入力レポートの単発読み出しが設定値を返した。** `spi_hid_ll_raw_request()` は常に GET_FEATURE を送るので、
    `hid-sensor-hub` の同期読み出しが設定値を照度として解釈していました。入力レポートの要求は失敗させ、
    `hid-sensor-hub` が次の定期レポート(750 ms ごと)を使うようにしました。
+4. **復帰後に黙ることがある。** s2idle から復帰したとき、センサーハブがリセット応答も含めて何も送ってこないことがあり、
+   以後のレポートはすべて捨てられます("HID not ready")。照度は 0 のままになり、ドライバを付け直すまで自動輝度も
+   止まります。復帰から 3 秒以内に割り込みが 1 回も来なければ、センサーハブをもう一度リセットし(最大 3 回)、
+   ログに `sensor hub silent after resume` と出すようにしました。
 
 本体はシンボルを公開せず、トレースの名前も変えてあるので、標準の `spi-hid` を置き換えたり衝突したりしません。
 
@@ -121,7 +125,9 @@ sudo ./rollback.sh     # surface-n1x-ssam/1.0 に戻す
 `backlight/n1x-edp-backlight-auto.patch` は、teo-casares さんの `n1x-edp-backlight` に自動輝度を足すパッチです
 (スクリプトは teo さんの Gist から取ってください。手順はパッチの先頭にあります)。`als` を使ってこの機種用の Windows の
 lux → nits 曲線に追従します。輝度キーで調整した分は曲線へのオフセットとして保存され、再起動後も残ります。
-`echo 0 > /var/lib/n1x-edp-backlight/auto` で自動輝度を止められます。
+`echo 0 > /var/lib/n1x-edp-backlight/auto` で自動輝度を止められます。起動時や、s2idle でパネルが明るさを失ったあとに
+明るさを戻すときは、一気に変えずに約 0.3 秒かけて変えます(ファームウェアはパネルを別の明るさにしておくので、起動と
+復帰のたびに明るさの変化が目に見えていました)。
 
 ## power-button: 電源ボタン
 

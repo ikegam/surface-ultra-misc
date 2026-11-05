@@ -9,6 +9,8 @@
  * sensor hub, built out of tree as n1x-spi-hid:
  *   - refuse GET_REPORT for input reports (it would return the feature report)
  *   - no exported symbols (linked into the same module as the ACPI glue)
+ *   - after s2idle resume, reset the sensor hub again if it stays silent (no
+ *     interrupt within 3 s): it sometimes never answers the resume _RST
  *
  * This code is partly based on "HID over I2C protocol implementation:
  *
@@ -100,6 +102,7 @@
 #define SPI_HID_RESET_PENDING	2
 #define SPI_HID_RESET_RESPONSE	3
 #define SPI_HID_CREATE_DEVICE	4
+#define SPI_HID_RESUME_CHECK_MS	3000	/* N1X: see spi_hid_resume_check() */
 #define SPI_HID_ERROR	5
 
 /* Processed data from input report header */
@@ -410,7 +413,10 @@ static int spi_hid_suspend(struct spi_hid *shid)
 	int error;
 	struct device *dev = &shid->spi->dev;
 
+	cancel_delayed_work_sync(&shid->resume_check);
 	guard(mutex)(&shid->power_lock);
+	dev_info(dev, "N1X: suspend: may_wakeup %d, flags %#lx, power %d, follower %d\n",
+		 device_may_wakeup(dev), shid->flags, shid->power_state, shid->is_panel_follower);
 	if (shid->power_state == HIDSPI_OFF)
 		return 0;
 
@@ -474,7 +480,12 @@ static int spi_hid_resume(struct spi_hid *shid)
 		}
 	}
 
+	shid->n1x_irqs_at_resume = atomic_read(&shid->n1x_irqs);
+	shid->n1x_tries = 0;
 	enable_irq(shid->spi->irq);
+	dev_info(dev, "N1X: resume: may_wakeup %d, flags %#lx, power %d\n",
+		 device_may_wakeup(dev), shid->flags, shid->power_state);
+	schedule_delayed_work(&shid->resume_check, msecs_to_jiffies(SPI_HID_RESUME_CHECK_MS));
 
 	if (shid->hid) {
 		error = hid_driver_reset_resume(shid->hid);
@@ -493,6 +504,36 @@ static int spi_hid_resume(struct spi_hid *shid)
 		}
 	}
 	return 0;
+}
+
+/*
+ * N1X (Surface Laptop Ultra): after s2idle the sensor hub sometimes sends no
+ * reset response to the _RST issued on resume, and every input report is then
+ * dropped ("HID not ready") until the driver is rebound. If the response has
+ * not arrived 3 s after resume, go through the error path (another _RST).
+ */
+static void spi_hid_resume_check(struct work_struct *work)
+{
+	struct spi_hid *shid = container_of(to_delayed_work(work), struct spi_hid,
+					    resume_check);
+
+	int irqs = atomic_read(&shid->n1x_irqs) - shid->n1x_irqs_at_resume;
+
+	dev_info(&shid->spi->dev, "N1X: %d ms after resume: %d irqs, flags %#lx, power %d\n",
+		 SPI_HID_RESUME_CHECK_MS, irqs, shid->flags, shid->power_state);
+	if (irqs && !test_bit(SPI_HID_RESET_PENDING, &shid->flags))
+		return;
+	if (shid->n1x_tries++ >= 3) {
+		dev_err(&shid->spi->dev, "N1X: sensor hub still silent after 3 resets; giving up\n");
+		return;
+	}
+	dev_warn(&shid->spi->dev, "N1X: sensor hub silent after resume; resetting it (try %d)\n",
+		 shid->n1x_tries);
+	shid->reset_attempts = 0;
+	shid->n1x_irqs_at_resume = atomic_read(&shid->n1x_irqs);
+	set_bit(SPI_HID_ERROR, &shid->flags);
+	schedule_work(&shid->reset_work);
+	schedule_delayed_work(&shid->resume_check, msecs_to_jiffies(SPI_HID_RESUME_CHECK_MS));
 }
 
 static void spi_hid_stop_hid(struct spi_hid *shid)
@@ -1040,6 +1081,8 @@ static irqreturn_t spi_hid_dev_irq(int irq, void *_shid)
 	struct device *dev = &shid->spi->dev;
 	struct spi_hid_input_header header;
 	int error = 0;
+
+	atomic_inc(&shid->n1x_irqs);
 
 	trace_spi_hid_dev_irq(shid, irq);
 	trace_spi_hid_header_transfer(shid);
@@ -1604,6 +1647,7 @@ int spi_hid_core_probe(struct spi_device *spi, struct spihid_ops *ops,
 	init_completion(&shid->output_done);
 
 	INIT_WORK(&shid->reset_work, spi_hid_reset_work);
+	INIT_DELAYED_WORK(&shid->resume_check, spi_hid_resume_check);
 	INIT_WORK(&shid->panel_follower_work, spi_hid_panel_follower_work);
 
 	/*
@@ -1664,6 +1708,7 @@ void spi_hid_core_remove(struct spi_device *spi)
 	else
 		disable_irq(spi->irq);
 
+	cancel_delayed_work_sync(&shid->resume_check);
 	cancel_work_sync(&shid->reset_work);
 
 	spi_hid_stop_hid(shid);

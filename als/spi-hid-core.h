@@ -76,6 +76,10 @@ struct spi_hid {
 	unsigned long flags;	/* device flags. */
 
 	struct work_struct reset_work;
+	struct delayed_work resume_check;	/* N1X: reset response watchdog after resume */
+	atomic_t n1x_irqs;			/* N1X: interrupts handled, for the watchdog */
+	int n1x_irqs_at_resume;
+	int n1x_tries;
 	struct work_struct panel_follower_work;
 
 	/* Control lock to ensure complete output transaction. */

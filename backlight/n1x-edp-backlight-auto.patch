@@ -13,6 +13,9 @@ Changes:
   lux -> nits curve for this machine, a brightness key press is kept as an offset on top
   of it (saved in $STATE_DIRECTORY/offset), "0" in $STATE_DIRECTORY/auto turns it off
 - re-apply DPCD 0x720/0x721 when the panel loses luminance-control mode (s2idle resume)
+- fade to the target over ~0.3 s instead of one jump when the level is (re)applied at
+  start-up or after the panel was reset (boot, s2idle resume); retry the NVIDIA device
+  every 2 s instead of 10 s at start-up
 
 --- n1x-edp-backlight
 +++ n1x-edp-backlight
@@ -37,7 +40,7 @@ Changes:
  MIN_NITS, MAX_NITS = 3.0, 1000.0    # EDID DisplayID: max suggested SDR luminance 1000 cd/m2
  RECHECK_S = 5.0
  
-@@ -98,6 +105,15 @@
+@@ -98,6 +105,30 @@
          return sum(self.aux_read(0x734 + i) << (8 * i) for i in range(3))
      def set_millinits(self, mn):
          self.aux_write(0x734, [mn & 0xff, (mn >> 8) & 0xff, (mn >> 16) & 0xff])
@@ -50,10 +53,25 @@ Changes:
 +        if self.aux_read(0x721) != mode:
 +            self.aux_write(0x721, [mode]); fixed = True
 +        return fixed
++
++FADE_STEPS, FADE_DT = 10, 0.03   # restore after boot/resume over ~0.3 s instead of one jump
++
++def fade(rm, want):
++    """Move the panel from its current luminance to want along the perceptual (%) curve."""
++    try:
++        cur = rm.get_millinits()
++    except (OSError, RmError):
++        cur = want
++    a, b = millinits_to_pct(cur), millinits_to_pct(want)
++    if abs(a - b) > 2:
++        for i in range(1, FADE_STEPS):
++            rm.set_millinits(pct_to_millinits(a + (b - a) * i / FADE_STEPS))
++            time.sleep(FADE_DT)
++    rm.set_millinits(want)
  
  def pct_to_millinits(p):
      p = max(0, min(100, p))
-@@ -105,12 +121,59 @@
+@@ -105,25 +136,73 @@
  def millinits_to_pct(mn):
      return max(0, min(100, round(100 * math.sqrt(max(mn / 1000.0, 0) / MAX_NITS))))
  
@@ -114,7 +132,13 @@ Changes:
                  cur = rm.get_millinits()
              if not mode & 0x80:
                  log(f"panel not in luminance-control mode (DPCD 0x721={mode:#x}); not supported, idling")
-@@ -123,7 +186,8 @@
+                 time.sleep(60); continue
+             break
+         except (OSError, RmError) as e:
+-            log("waiting for NVIDIA RM / panel:", e); time.sleep(10)
++            log("waiting for NVIDIA RM / panel:", e); time.sleep(2)
+ 
+     target = None
      try:
          with open(STATE) as f: target = int(f.read().strip())
      except (OSError, ValueError): pass
@@ -124,7 +148,7 @@ Changes:
  
      ufd = os.open("/dev/uleds", os.O_RDWR)
      os.write(ufd, struct.pack("64si", LED_NAME, 100))
-@@ -135,22 +199,58 @@
+@@ -135,22 +214,61 @@
  
      applied = None
      poller = select.poll(); poller.register(ufd, select.POLLIN)
@@ -178,15 +202,19 @@ Changes:
 +                    applied = None
                  if not evs and applied == want and rm.get_millinits() == want:
                      continue
-                 rm.set_millinits(want)
+-                rm.set_millinits(want)
 -            if applied != want:
++                if applied is None:     # first apply after start, or the panel was reset
++                    fade(rm, want)
++                else:
++                    rm.set_millinits(want)
 +            if applied != want and (user or not auto):
                  log(f"brightness {target}% -> {want/1000:.0f} nits")
 +            if applied != want:
                  try:
                      with open(STATE + ".tmp", "w") as f: f.write(str(target))
                      os.replace(STATE + ".tmp", STATE)
-@@ -165,4 +265,3 @@
+@@ -165,4 +283,3 @@
  
  if __name__ == "__main__":
      sys.exit(main())

@@ -143,7 +143,8 @@ has three GPIOs on `\_SB.GIO0`: pin 46 (power, the only one marked as a wake sou
 no volume rocker; as teo-casares found, 40/41 float and report "Volume Down" held forever. `n1x-power-button` binds
 to `MSHW0040`, takes only pin 46 and leaves 40/41 alone, so `modprobe.blacklist=gpio_keys` can stay on the kernel
 command line. The level at load time counts as released. A press during suspend wakes the machine but is not
-reported, so the power menu does not open after resume.
+reported, so the power menu does not open after resume. `install.sh` also blacklists `soc_button_array`, which
+would otherwise claim `MSHW0040` on a kernel that builds it for arm64 (omacom/omarchy-pkgs#2166).
 
 ```
 cd power-button

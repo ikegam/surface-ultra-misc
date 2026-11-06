@@ -24,6 +24,7 @@ teo-casares さんによる、この機種で Omarchy を動かす取り組み�
 | `usb4/` | USB4 のトンネル用ポートを止めない設定 | **teo さんが discussion で示した方式**を独自に実装したもの |
 | `suspend/` | ふたを閉じたときの誤復帰の防止、復帰直後にキーが効かない問題 | ふた閉じのフックは **teo さんが discussion で示した方式**を独自に実装し、タッチパッドと電源ボタンを足したもの。NVIDIA の部分は独立 |
 | `keyboard/` | Caps Lock の遅れ、キー再マップでの連打 | 独立 |
+| `audio-jack/` | ヘッドホンジャックの検出 | 独立(上流の Realtek ドライバ) |
 
 ## als: 照度センサー
 
@@ -209,7 +210,25 @@ sudo ./uninstall.sh
 20 ms 未満の押下は 1 回もありませんでしたが、keyd を通した仮想キーボードでは 3〜17 ms の押下が何回も出ていて、連打に
 見えていました。Caps→Ctrl などは keyd を使わず、Hyprland の `kb_options = ctrl:nocaps` やキー割り当てで行うのが安全です。
 
+## audio-jack: ヘッドホンジャックの検出
+
+linux-omarchy 7.3 の rt721-sdca ドライバでは、3.5mm ジャックにヘッドホンを挿しても検出されません。`Headphone Jack`
+は off のままで、PipeWire はスピーカーから鳴らし続けます。挿したとき RT721 はジャック検出の割り込み(SDCA 割り込み
+0)を出さず、Function_Status(割り込み 3)だけが来ます。抜いたときは検出されます。Linux v7.4-rc1 の rt721-sdca で
+直っています。Realtek によるジャック検出の設定の見直し(`e2eb4873b901` "Adjust blindwrite flow to fix type detection
+issue")と関連する修正が入っています。このディレクトリはそのドライバを無改変のまま 7.3 向けにビルドします(DKMS の
+`BUILD_EXCLUSIVE_KERNEL` は `^7\.3\.`。7.4 には本体に入っています)。
+
+```
+cd audio-jack
+sudo ./install.sh      # DKMS に入れて、すぐサウンドカードを組み直す。再起動不要
+sudo ./uninstall.sh    # カーネル本体のモジュールに戻す
+```
+
+`install.sh` はサウンドカードを組み直す間、PipeWire を数秒止めます。
+
 ## ライセンス
 
 GPL-2.0(LICENSE を参照)。`als/` の spi-hid のソースは linux-omarchy が取り込んでいる spi-hid パッチ群(Microsoft、
 Google、Semihalf ほか)から取ったもので、変更点は各ファイルの先頭に書いてあります。
+`audio-jack/` の rt721-sdca のソースは Realtek のもの(GPL-2.0-only)で、Linux v7.4-rc1 から無改変でコピーしています。

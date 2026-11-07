@@ -250,10 +250,6 @@ LD_PRELOAD=$PWD/ratedtdp-probe.so nvidia-smi -L
 
 nvidia-powerd 620 の QBoost ワーカーを N1X で動かす `LD_PRELOAD` シムです。NVPCF 3.x を隠し、2.x の問い合わせに答え、TGP の電力ポリシーを指定し、デーモンが読む x86 の RAPL MSR を模し、AC 状態を `ADP1` から返し、デーモンの制御目標が見えるように RM の制御をすべてログに残します。調査用で、常用するものではありません。`make` でビルドし(対応する open-gpu-kernel-modules の SDK ヘッダが要ります)、ファイル先頭にある `SHIM_*` 変数を付けて `LD_PRELOAD` でデーモンを動かします。
 
-### procfs の Notebook Dynamic Boost
-
-`0010-report-dynamic-boost-on-nvpcf-3x-platforms.patch`(nvidia-open-dkms 用)を当てると、プラットフォームが NVPCF 3.x の問い合わせに答えたときに `/proc/driver/nvidia/gpus/*/power` が "Notebook Dynamic Boost: Supported" と表示します。表示だけで、ほかは何も変わりません。
-
 ## ライセンス
 
 GPL-2.0(LICENSE を参照)。`als/` の spi-hid のソースは linux-omarchy が取り込んでいる spi-hid パッチ群(Microsoft、

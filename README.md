@@ -277,12 +277,6 @@ An `LD_PRELOAD` shim that lets nvidia-powerd 620 start its QBoost worker on N1X:
 Build with `make` (it needs the SDK headers of the matching open-gpu-kernel-modules), then run the daemon with
 `LD_PRELOAD` and the `SHIM_*` variables described at the top of the file.
 
-### Notebook Dynamic Boost in procfs
-
-`0010-report-dynamic-boost-on-nvpcf-3x-platforms.patch` (for nvidia-open-dkms) makes
-`/proc/driver/nvidia/gpus/*/power` report "Notebook Dynamic Boost: Supported" when the platform answers the NVPCF
-3.x query. The line is only a display; it changes nothing else.
-
 ## License
 
 GPL-2.0 (see LICENSE). The spi-hid sources in `als/` come from the spi-hid series carried by linux-omarchy

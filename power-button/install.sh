@@ -9,9 +9,8 @@ dkms status "$PKG/$VER" | grep -q . && dkms remove "$PKG/$VER" --all
 rm -rf "$SRC"; install -d "$SRC"
 install -m644 "$here"/{Makefile,Kbuild,dkms.conf,n1x_power_button.c} "$SRC/"
 dkms install "$PKG/$VER"
-# Keep soc_button_array (if a kernel ships it on arm64) off MSHW0040: it would register the
-# floating volume pins. Harmless while the module does not exist.
-echo "blacklist soc_button_array" > /etc/modprobe.d/n1x-no-soc-button-array.conf
+# Older versions blacklisted soc_button_array; the kernel now skips MSHW0040 itself.
+rm -f /etc/modprobe.d/n1x-no-soc-button-array.conf
 rmmod n1x_power_button 2>/dev/null || true
 modprobe n1x_power_button
 sleep 0.5

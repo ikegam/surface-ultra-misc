@@ -21,7 +21,6 @@ Start there; the pieces below assume that setup.
 | [`ssam-helper/`](#ssam-helper-stock-ssam-without-patched-modules) | stock SSAM + helper modules | **their approach** (described in the discussion), implemented independently |
 | [`backlight/`](#backlight-automatic-brightness) | automatic brightness | **a patch to their `n1x-edp-backlight`** (the script is not copied here) |
 | [`power-button/`](#power-button) | power button driver | independent driver; the cause of the phantom "Volume Down" (floating `MSHW0040` pins) was found by them |
-| [`usb4/`](#usb4-docks) | keeps the USB4 tunnel ports awake | **their approach** (described in the discussion), implemented independently |
 | [`suspend/`](#suspend-sleep-and-resume) | no wakeups with the lid closed; keys dead right after resume | the lid hook is **their approach** (described in the discussion), implemented independently, with the touchpad and power button added; the NVIDIA part is independent |
 | [`sapd-lps0/`](#sapd-lps0-surface-modern-standby-notifications) | sends the Surface-specific Modern Standby notifications around suspend (experimental) | independent |
 | [`keyboard/`](#keyboard-caps-lock-lag) | Caps Lock lag; repeated keys through a key remapper | independent |
@@ -141,13 +140,13 @@ another level, so the change was visible at every boot and resume).
 Makes the power button work. A short press sends `KEY_POWER`, which opens Omarchy's power menu.
 
 The buttons are behind ACPI `MSHW0040` (`\_SB.MSBT`). On x86 Surfaces `soc_button_array` turns that into
-gpio-keys devices, but `soc_button_array` is x86-only, so on this machine the power button has no driver. Its `_CRS`
+gpio-keys devices. Upstream 7.3 builds `soc_button_array` for x86 only; linux-omarchy builds it for arm64 again but
+skips `MSHW0040` on this machine (omacom/omarchy-pkgs#2166), so the power button has no driver. Its `_CRS`
 has three GPIOs on `\_SB.GIO0`: pin 46 (power, the only one marked as a wake source) and pins 40/41. This laptop has
 no volume rocker; as teo-casares found, 40/41 float and report "Volume Down" held forever. `n1x-power-button` binds
 to `MSHW0040`, takes only pin 46 and leaves 40/41 alone, so `modprobe.blacklist=gpio_keys` can stay on the kernel
 command line. The level at load time counts as released. A press during suspend wakes the machine but is not
-reported, so the power menu does not open after resume. `install.sh` also blacklists `soc_button_array`, which
-would otherwise claim `MSHW0040` on a kernel that builds it for arm64 (omacom/omarchy-pkgs#2166).
+reported, so the power menu does not open after resume.
 
 ```
 cd power-button
@@ -158,21 +157,6 @@ sudo ./uninstall.sh
 Waking from suspend with the button works (tested with the lid open). If the machine sleeps with the lid closed, also
 turn off the button's wakeup (`/sys/bus/platform/devices/MSHW0040:00/power/wakeup`), as for the keyboard and touchpad;
 otherwise a press in a bag wakes it. The hook in `suspend/` does this.
-
-## usb4: docks
-
-USB4 / Thunderbolt docks need the three USB4 tunnel root ports (`10de:22cf`) kept out of runtime suspend
-(teo-casares, tested with a Thunderbolt dock). `usb4/75-n1x-usb4-tunnel-pm.rules` sets `power/control=on` on them.
-The other part of their setup, `power_wrap_drv.usb4_release=0`, is already the default for N1X on linux-omarchy 7.3.
-They also saw suspend fail in one boot with a dock attached, so unplug the dock before suspending.
-
-```
-cd usb4
-sudo ./install.sh      # applies at once; no reboot
-sudo ./uninstall.sh
-```
-
-Not tested with a dock here.
 
 ## suspend: sleep and resume
 
@@ -308,6 +292,14 @@ An `LD_PRELOAD` shim that lets nvidia-powerd 620 start its QBoost worker on N1X:
 `ADP1`, and logs every RM control so the daemon's control targets can be seen. It is for study, not for daily use.
 Build with `make` (it needs the SDK headers of the matching open-gpu-kernel-modules), then run the daemon with
 `LD_PRELOAD` and the `SHIM_*` variables described at the top of the file.
+
+## Dropped
+
+- `usb4/` (2026-11-12): linux-omarchy keeps a tunnel root port awake while a dock's PCIe tunnel runs through it
+  (patch `1105`, already in 7.3-3), so the udev rule that kept all three ports on is no longer needed.
+- The `soc_button_array` blacklist from `power-button/install.sh` (2026-11-12): the kernel skips `MSHW0040` itself.
+
+If you installed them: `sudo rm -f /etc/udev/rules.d/75-n1x-usb4-tunnel-pm.rules /etc/modprobe.d/n1x-no-soc-button-array.conf`
 
 ## License
 

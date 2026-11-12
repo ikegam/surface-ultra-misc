@@ -21,7 +21,6 @@ teo-casares さんによる、この機種で Omarchy を動かす取り組み�
 | `ssam-helper/` | 標準 SSAM + 補助モジュール | **teo さんが discussion で示した方式**を独自に実装したもの |
 | `backlight/` | 自動輝度 | **teo さんの `n1x-edp-backlight` へのパッチ**(スクリプト本体はここには入れていない) |
 | `power-button/` | 電源ボタンのドライバ | 独立したドライバ。phantom の「音量下げ」(浮いた `MSHW0040` のピン)の原因は teo さんが見つけたもの |
-| `usb4/` | USB4 のトンネル用ポートを止めない設定 | **teo さんが discussion で示した方式**を独自に実装したもの |
 | `suspend/` | ふたを閉じたときの誤復帰の防止、復帰直後にキーが効かない問題 | ふた閉じのフックは **teo さんが discussion で示した方式**を独自に実装し、タッチパッドと電源ボタンを足したもの。NVIDIA の部分は独立 |
 | `sapd-lps0/` | サスペンド前後に Surface 固有の Modern Standby 通知を送る(試験中) | 独立 |
 | `keyboard/` | Caps Lock の遅れ、キー再マップでの連打 | 独立 |
@@ -137,14 +136,13 @@ lux → nits 曲線に追従します。輝度キーで調整した分は曲線�
 電源ボタンを使えるようにします。短く押すと `KEY_POWER` が送られ、Omarchy の電源メニューが開きます。
 
 ボタンは ACPI の `MSHW0040`(`\_SB.MSBT`)の向こうにあります。x86 の Surface では `soc_button_array` がこれを gpio-keys
-にしますが、`soc_button_array` は x86 専用なので、この機種では電源ボタンにドライバがありません。`_CRS` には
+にします。upstream の 7.3 は `soc_button_array` を x86 だけでビルドし、linux-omarchy は arm64 でもビルドしますが、この機種の
+`MSHW0040` は飛ばします(omacom/omarchy-pkgs#2166)。そのため、この機種では電源ボタンにドライバがありません。`_CRS` には
 `\_SB.GIO0` の GPIO が 3 本あり、46 番が電源(復帰の要因として指定されているのはこれだけ)、残りが 40・41 番です。
 この機種には音量ボタンがなく、teo-casares さんが見つけたとおり 40・41 番は浮いていて「音量下げ」を押しっぱなしと報告
 します。`n1x-power-button` は `MSHW0040` に対応し、46 番だけを使って 40・41 番には触りません。そのため
 `modprobe.blacklist=gpio_keys` は起動オプションに残したままで構いません。読み込んだ時点の値を「離している」とみなします。
-サスペンド中に押すと復帰しますが、キーは送らないので、復帰後に電源メニューは開きません。`install.sh` は
-`soc_button_array` もブラックリストに入れます。arm64 向けにこれをビルドしたカーネル(omacom/omarchy-pkgs#2166)では、
-そうしないと `soc_button_array` が `MSHW0040` を取ってしまうためです。
+サスペンド中に押すと復帰しますが、キーは送らないので、復帰後に電源メニューは開きません。
 
 ```
 cd power-button
@@ -155,22 +153,6 @@ sudo ./uninstall.sh
 ボタンでサスペンドから復帰できます(ふたを開けた状態で確認)。ふたを閉じてサスペンドする場合は、キーボードやタッチパッドと
 同じように、ボタンの wakeup(`/sys/bus/platform/devices/MSHW0040:00/power/wakeup`)も止めてください。止めないと、
 カバンの中で押されて起きてしまいます。`suspend/` のフックがこれを行います。
-
-## usb4: ドック
-
-USB4 / Thunderbolt のドックを使うには、USB4 のトンネル用ルートポート 3 つ(`10de:22cf`)を省電力で止めないようにする
-必要があります(teo-casares さんが Thunderbolt ドックで確認)。`usb4/75-n1x-usb4-tunnel-pm.rules` がこれらに
-`power/control=on` を設定します。teo さんの設定のもう一方の `power_wrap_drv.usb4_release=0` は、linux-omarchy 7.3 では
-N1X の既定値になっています。ドックを挿したままだとサスペンドに失敗した例があるそうなので、サスペンド前にはドックを
-抜いてください。
-
-```
-cd usb4
-sudo ./install.sh      # すぐ効く。再起動不要
-sudo ./uninstall.sh
-```
-
-ここではドックでの確認はしていません。
 
 ## suspend: サスペンドと復帰
 
@@ -280,6 +262,14 @@ LD_PRELOAD=$PWD/ratedtdp-probe.so nvidia-smi -L
 ### nvpcf-shim(実験)
 
 nvidia-powerd 620 の QBoost ワーカーを N1X で動かす `LD_PRELOAD` シムです。NVPCF 3.x を隠し、2.x の問い合わせに答え、TGP の電力ポリシーを指定し、デーモンが読む x86 の RAPL MSR を模し、AC 状態を `ADP1` から返し、デーモンの制御目標が見えるように RM の制御をすべてログに残します。調査用で、常用するものではありません。`make` でビルドし(対応する open-gpu-kernel-modules の SDK ヘッダが要ります)、ファイル先頭にある `SHIM_*` 変数を付けて `LD_PRELOAD` でデーモンを動かします。
+
+## 削除したもの
+
+- `usb4/`(2026-11-12): linux-omarchy はドックの PCIe トンネルがある間だけトンネル用ルートポートを起こしておく
+  (パッチ `1105`、7.3-3 にすでに入っている)ので、3 つのポートを常に起こしておく udev ルールは不要になりました。
+- `power-button/install.sh` の `soc_button_array` ブラックリスト(2026-11-12): カーネル自身が `MSHW0040` を飛ばします。
+
+入れていた場合: `sudo rm -f /etc/udev/rules.d/75-n1x-usb4-tunnel-pm.rules /etc/modprobe.d/n1x-no-soc-button-array.conf`
 
 ## ライセンス
 

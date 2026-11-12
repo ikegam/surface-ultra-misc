@@ -23,6 +23,7 @@ teo-casares さんによる、この機種で Omarchy を動かす取り組み�
 | `power-button/` | 電源ボタンのドライバ | 独立したドライバ。phantom の「音量下げ」(浮いた `MSHW0040` のピン)の原因は teo さんが見つけたもの |
 | `usb4/` | USB4 のトンネル用ポートを止めない設定 | **teo さんが discussion で示した方式**を独自に実装したもの |
 | `suspend/` | ふたを閉じたときの誤復帰の防止、復帰直後にキーが効かない問題 | ふた閉じのフックは **teo さんが discussion で示した方式**を独自に実装し、タッチパッドと電源ボタンを足したもの。NVIDIA の部分は独立 |
+| `sapd-lps0/` | サスペンド前後に Surface 固有の Modern Standby 通知を送る(試験中) | 独立 |
 | `keyboard/` | Caps Lock の遅れ、キー再マップでの連打 | 独立 |
 | `audio-jack/` | ヘッドホンジャックの検出 | 独立(上流の Realtek ドライバ) |
 | `gpu-power/` | NVIDIA の電力管理(nvidia-powerd、RATED_TDP)の調査メモと診断ツール | 独立 |
@@ -193,6 +194,36 @@ sudo ./install.sh                       # フックだけ。次のサスペン�
 sudo ./install.sh --mask-nvidia-sleep   # 加えて nvidia-suspend/resume をマスク(ドライバ設定を確認してから)
 sudo ./uninstall.sh
 ```
+
+## sapd-lps0: Surface の Modern Standby 通知
+
+**試験中で、効果はまだ評価中です。** この機械では、ふたを閉じた s2idle の 7〜10 回に 1 回ほどが復帰しませんでした。
+journal は `PM: suspend entry (s2idle)` で終わり、pstore にも記録が残らないまま SoC が自分でリセットします。その次の起動は
+NVIDIA の GSP 初期化(`GspStatusQueueInit ... NV_ERR_TIMEOUT`)で止まって画面が出ず、電源ボタンをもう一度長押しすると
+普通に起動します。
+
+ファームウェアには、Microsoft の Modern Standby `_DSM`(`11e00d56-ce64-47ce-837b-1f898f9aa461`)を持つ LPS0 デバイス
+(`_CID PNP0D80`)が 2 つあります。
+
+- `\_SB.PEPD`(`NVDA6210`): NVIDIA のプラットフォーム拡張。linux-omarchy の power_wrap(NVIDIA のふた復帰パッチ、
+  NV-Kernels #656)がすでに呼んでいます(カーネルログの `LPS0 EC sleep notifications enabled`)。
+- `\_SB.SAPD`(`MSHW0299`): Surface だけのもの。Linux では誰も呼びません。function 7(スリープ開始)で GPIO 136 を Low に
+  し、3/4/8/9 で High に戻します。このピンを触る ACPI メソッドはほかにありません。Windows ではスリープ中ずっと Low、
+  Linux では High のままです。
+
+`n1x_sapd_lps0` は `MSHW0299` にバインドし、Windows と同じ順序の通知をデバイスの noirq フェーズで送ります(入るときに
+3, 7, 5、出るときに 6, 9, 8, 4)。失敗はログに残すだけで、サスペンドは止めません。リセットが止まるかはまだ確かめられて
+おらず、ふた閉じ数十回分で試験中です。スリープの深さは変わりません(サスペンドごとに DRIPS 1 回)。
+
+```
+cd sapd-lps0
+sudo ./install.sh                                   # DKMS。すぐロードされ、再起動不要
+cat /sys/bus/platform/devices/MSHW0299:00/stats     # functions=0x3f8 entries=N failures=0 enable=1
+echo 0 | sudo tee /sys/module/n1x_sapd_lps0/parameters/enable   # A/B 比較用に送信を止める
+sudo ./uninstall.sh
+```
+
+サスペンドのたびに `entry notifications sent (#N)` / `exit notifications sent` がログに出ます(モジュールパラメータ `verbose`)。
 
 ## keyboard: Caps Lock の遅れ
 

@@ -3,3 +3,5 @@
 *.irs
 *.conf
 *.json
+# our own WirePlumber rule (not OEM data)
+!wireplumber/*.conf

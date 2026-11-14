@@ -310,6 +310,16 @@ cd speaker-tuning
 
 The PipeWire restart is followed by a restart of the desktop portals, otherwise screen sharing breaks.
 
+The limiter's automatic level regulation can make the volume sway slightly on loud passages. Turning it off or
+dropping the +4 dB `volmax` boost (`./install.sh --disable volmax`) was tried: without the regulation the limiter
+distorts, and without the boost the speakers get quiet.
+
+**Playback starting late.** When the speakers have been idle, PipeWire closes them and the amps power down; waking
+the link, both amps and their DSP takes about 2 s, so the first sound comes late. `./no-suspend.sh on` keeps the
+speakers open (a WirePlumber rule, `wireplumber/51-speaker-no-suspend.conf`) so playback starts at once, at the
+cost of some idle power; `./no-suspend.sh off` undoes it. After a system resume the speakers stay closed until
+the first playback, so that one start is still slow, but it never overlaps the amp DSP reload that runs on resume.
+
 ## gpu-power: NVIDIA power management notes
 
 Notes from looking into why some N1X laptops hold the GPU at ~750 MHz on AC while this one does not. Driver

@@ -66,6 +66,14 @@ done
 fetch_converter
 # Without the volume leveler: it pulls everything down to -26 LUFS and the speakers end up quiet.
 run_converter "$CACHE/oem/$TUNING_XML" --no-activate --force --disable autogain "$@"
+# The +4 dB volmax boost drives the limiter, whose automatic level regulation (ALR) then
+# audibly pumps the volume. Boost +2 dB instead (speaker-amp raises the amp gain to make up)
+# and let ALR move slowly. Turning ALR off makes the limiter distort.
+for conf in "${XDG_CONFIG_HOME:-$HOME/.config}"/pipewire/pipewire.conf.d/Dolby_*.conf; do
+    [ -f "$conf" ] || continue
+    sed -i -e 's/^\( *g_in = \)1\.584893192$/\11.258925412/' \
+           -e 's/^\( *alr_at = \)10$/\150/' -e 's/^\( *alr_rt = \)200$/\11000/' "$conf"
+done
 restart_audio
 sleep 2
 # Keep the speaker itself as the default output; selecting the filter's sink too stacks two volumes.

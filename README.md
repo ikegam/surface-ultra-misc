@@ -276,7 +276,7 @@ This directory builds them **from your own Windows install** and changes the dri
     `DSP FW Update` control goes through the same delayed path;
   - checks that the DSP started, and keeps it bypassed (stock sound) if it did not.
 - `speaker-amp-gain`: their UCM profile caps the amp gain at 75 (-9 dB) because no speaker protection was loaded.
-  `install.sh` adds one `exec` line to that profile (backup kept) which raises it to 81 (-4.5 dB) only while both
+  `install.sh` adds one `exec` line to that profile (backup kept) which raises it to 83 (-3 dB) only while both
   amps run the DSP firmware.
 
 ```
@@ -310,9 +310,10 @@ cd speaker-tuning
 
 The PipeWire restart is followed by a restart of the desktop portals, otherwise screen sharing breaks.
 
-The limiter's automatic level regulation can make the volume sway slightly on loud passages. Turning it off or
-dropping the +4 dB `volmax` boost (`./install.sh --disable volmax`) was tried: without the regulation the limiter
-distorts, and without the boost the speakers get quiet.
+The converted chain boosts by +4 dB (`volmax`) into a limiter whose automatic level regulation (ALR) then makes
+the volume sway on loud passages. `install.sh` therefore boosts only +2 dB (speaker-amp's amp gain of 83 makes up
+for it) and slows ALR down (attack 50 ms, release 1 s). Turning ALR off makes the limiter distort; dropping the
+boost entirely (`--disable volmax`) makes the speakers quiet.
 
 **Playback starting late.** When the speakers have been idle, PipeWire closes them and the amps power down; waking
 the link, both amps and their DSP takes about 2 s, so the first sound comes late. `./no-suspend.sh on` keeps the

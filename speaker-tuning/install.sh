@@ -67,15 +67,15 @@ fetch_converter
 # Without the volume leveler: it pulls everything down to -26 LUFS and the speakers end up quiet.
 run_converter "$CACHE/oem/$TUNING_XML" --no-activate --force --disable autogain "$@"
 # The converted chain boosts +4 dB (volmax) into a limiter whose automatic level regulation
-# (ALR) then pulls everything, vocals included, down as a mix gets denser. Drop the boost
-# (speaker-amp's amp gain of 85 makes up for it), keep the bass enhancer a little gentler
-# (Windows has it off, but it gives this chassis its body), and let ALR move slowly.
-# Turning ALR off makes the limiter distort when it does act.
+# (ALR) then pulls everything, vocals included, up and down with the mix. Drop the boost
+# (speaker-amp's amp gain of 85 makes up for it) and ALR; the limiter stays as a plain
+# brickwall against clipping. Keep the bass enhancer at half strength: Windows has it off,
+# but it gives this chassis its body.
 for conf in "${XDG_CONFIG_HOME:-$HOME/.config}"/pipewire/pipewire.conf.d/Dolby_*.conf; do
     [ -f "$conf" ] || continue
     sed -i -e 's/^\( *g_in = \)1\.584893192$/\11/' \
-           -e 's/^\( *amount = \)3\.981071706$/\13/' \
-           -e 's/^\( *alr_at = \)10$/\150/' -e 's/^\( *alr_rt = \)200$/\11000/' "$conf"
+           -e 's/^\( *amount = \)3\.981071706$/\12/' \
+           -e 's/^\( *alr = \)1$/\10/' "$conf"
 done
 restart_audio
 sleep 2

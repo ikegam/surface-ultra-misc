@@ -1,5 +1,6 @@
 #!/bin/sh
-# Run by UCM when the speakers are enabled. The Surface UCM profile caps the amp gain at
+# Run by UCM when the speakers are enabled. Sets the amps' channel routing, and: the
+# Surface UCM profile caps the amp gain at
 # 75 (-9 dB) because Linux used to run the amps without speaker protection. Raise it to
 # 85 (-1.5 dB) only while both amps actually run the DSP FW that provides that protection.
 # At boot the DSP FW loads ~10 s after the card appears, usually after this runs, so wait
@@ -16,6 +17,12 @@ raise() {
         amixer -q -c "$c" cset name="rt1320-$n FU21 Playback Volume" 85,85
     done
 }
+
+# Channel routing as Windows sets it (SDCA init table, 0x41080200): the left amp plays only
+# the left channel and the right amp only the right. The driver default sends L,R to both
+# amps, which collapses the stereo image to the middle.
+amixer -q -c "$c" cset name="rt1320-1 RX Channel Select" 2   # L,L
+amixer -q -c "$c" cset name="rt1320-2 RX Channel Select" 3   # R,R
 
 if dsp_on; then
     raise

@@ -275,6 +275,9 @@ This directory builds them **from your own Windows install** and changes the dri
     first load waits for the boot-time `n1x-sdw-settle` bus reset and the `alsactl` restore of the
     `DSP FW Update` control goes through the same delayed path;
   - checks that the DSP started, and keeps it bypassed (stock sound) if it did not.
+  - `acpi_init_table=1` (off by default) also applies the amp function's SDCA initialization table from ACPI,
+    as Windows does. Applied after the generic preset it leaves the speakers silent, so it is only for
+    experiments.
 - `speaker-amp-gain`: their UCM profile caps the amp gain at 75 (-9 dB) because no speaker protection was loaded.
   `install.sh` adds one `exec` line to that profile (backup kept) which raises it to 83 (-3 dB) only while both
   amps run the DSP firmware.

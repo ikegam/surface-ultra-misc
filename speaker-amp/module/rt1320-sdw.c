@@ -2532,6 +2532,57 @@ static void rt1321_preset(struct rt1320_sdw_priv *rt1320)
 	}
 }
 
+static bool acpi_init_table;
+module_param(acpi_init_table, bool, 0644);
+MODULE_PARM_DESC(acpi_init_table, "Apply the firmware's SDCA initialization table after the preset (experimental: leaves the speakers silent here)");
+
+/*
+ * The platform firmware describes the amp function's initialization writes
+ * (gains, protection thresholds, DSP parameters) in the DisCo table; Windows
+ * applies them at function init. Apply them after the generic preset, which
+ * they override.
+ */
+static void rt1320_apply_init_table(struct rt1320_sdw_priv *rt1320)
+{
+	struct sdw_slave *slave = rt1320->sdw_slave;
+	struct device *dev = &slave->dev;
+	struct sdca_function_data *function;
+	int i, ret;
+
+	if (!acpi_init_table || rt1320->acpi_init_failed)
+		return;
+
+	if (!rt1320->amp_function) {
+		for (i = 0; i < slave->sdca_data.num_functions; i++)
+			if (slave->sdca_data.function[i].adr == FUNC_NUM_AMP)
+				break;
+		if (i == slave->sdca_data.num_functions)
+			goto fail;
+
+		function = devm_kzalloc(dev, sizeof(*function), GFP_KERNEL);
+		if (!function)
+			goto fail;
+		function->desc = &slave->sdca_data.function[i];
+		ret = sdca_parse_function(dev, function);
+		if (ret || !function->num_init_table) {
+			dev_warn(dev, "%s: no usable SDCA init table (%d)\n", __func__, ret);
+			goto fail;
+		}
+		rt1320->amp_function = function;
+	}
+
+	ret = sdca_regmap_write_init(dev, rt1320->regmap, rt1320->amp_function);
+	if (ret)
+		dev_warn(dev, "%s: SDCA init table write failed: %d\n", __func__, ret);
+	else
+		dev_info(dev, "applied %d SDCA init table writes\n",
+			 rt1320->amp_function->num_init_table);
+	return;
+
+fail:
+	rt1320->acpi_init_failed = true;
+}
+
 static int rt1320_io_init(struct device *dev, struct sdw_slave *slave)
 {
 	struct rt1320_sdw_priv *rt1320 = dev_get_drvdata(dev);
@@ -2599,6 +2650,12 @@ static int rt1320_io_init(struct device *dev, struct sdw_slave *slave)
 			break;
 		default:
 			dev_err(dev, "%s: Unknown device ID %d\n", __func__, rt1320->dev_id);
+		}
+
+		if (rt1320->dev_id == RT1320_DEV_ID) {
+			regcache_cache_bypass(rt1320->regmap, true);
+			rt1320_apply_init_table(rt1320);
+			regcache_cache_bypass(rt1320->regmap, rt1320->first_hw_init);
 		}
 
 		regmap_write(rt1320->regmap,
@@ -3830,3 +3887,4 @@ module_sdw_driver(rt1320_sdw_driver);
 MODULE_DESCRIPTION("ASoC RT1320 driver SDCA SDW");
 MODULE_AUTHOR("Shuming Fan <shumingf@realtek.com>");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("SND_SOC_SDCA");

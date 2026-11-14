@@ -185,7 +185,78 @@
  }
  
  static void rt1320_vc_preset(struct rt1320_sdw_priv *rt1320)
-@@ -2526,6 +2638,8 @@
+@@ -2416,6 +2528,57 @@
+ 	}
+ }
+ 
++static bool acpi_init_table;
++module_param(acpi_init_table, bool, 0644);
++MODULE_PARM_DESC(acpi_init_table, "Apply the firmware's SDCA initialization table after the preset (experimental: leaves the speakers silent here)");
++
++/*
++ * The platform firmware describes the amp function's initialization writes
++ * (gains, protection thresholds, DSP parameters) in the DisCo table; Windows
++ * applies them at function init. Apply them after the generic preset, which
++ * they override.
++ */
++static void rt1320_apply_init_table(struct rt1320_sdw_priv *rt1320)
++{
++	struct sdw_slave *slave = rt1320->sdw_slave;
++	struct device *dev = &slave->dev;
++	struct sdca_function_data *function;
++	int i, ret;
++
++	if (!acpi_init_table || rt1320->acpi_init_failed)
++		return;
++
++	if (!rt1320->amp_function) {
++		for (i = 0; i < slave->sdca_data.num_functions; i++)
++			if (slave->sdca_data.function[i].adr == FUNC_NUM_AMP)
++				break;
++		if (i == slave->sdca_data.num_functions)
++			goto fail;
++
++		function = devm_kzalloc(dev, sizeof(*function), GFP_KERNEL);
++		if (!function)
++			goto fail;
++		function->desc = &slave->sdca_data.function[i];
++		ret = sdca_parse_function(dev, function);
++		if (ret || !function->num_init_table) {
++			dev_warn(dev, "%s: no usable SDCA init table (%d)\n", __func__, ret);
++			goto fail;
++		}
++		rt1320->amp_function = function;
++	}
++
++	ret = sdca_regmap_write_init(dev, rt1320->regmap, rt1320->amp_function);
++	if (ret)
++		dev_warn(dev, "%s: SDCA init table write failed: %d\n", __func__, ret);
++	else
++		dev_info(dev, "applied %d SDCA init table writes\n",
++			 rt1320->amp_function->num_init_table);
++	return;
++
++fail:
++	rt1320->acpi_init_failed = true;
++}
++
+ static int rt1320_io_init(struct device *dev, struct sdw_slave *slave)
+ {
+ 	struct rt1320_sdw_priv *rt1320 = dev_get_drvdata(dev);
+@@ -2485,6 +2648,12 @@
+ 			dev_err(dev, "%s: Unknown device ID %d\n", __func__, rt1320->dev_id);
+ 		}
+ 
++		if (rt1320->dev_id == RT1320_DEV_ID) {
++			regcache_cache_bypass(rt1320->regmap, true);
++			rt1320_apply_init_table(rt1320);
++			regcache_cache_bypass(rt1320->regmap, rt1320->first_hw_init);
++		}
++
+ 		regmap_write(rt1320->regmap,
+ 			SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT0, RT1320_SDCA_CTL_FUNC_STATUS, 0),
+ 			FUNCTION_NEEDS_INITIALIZATION);
+@@ -2526,6 +2695,8 @@
  	rt1320->first_hw_init = true;
  	rt1320->hw_init = true;
  
@@ -194,7 +265,7 @@
  	pm_runtime_put_autosuspend(&slave->dev);
  
  	dev_dbg(&slave->dev, "%s hw_init complete\n", __func__);
-@@ -3019,9 +3133,18 @@
+@@ -3019,9 +3190,18 @@
  	if (ret < 0 && ret != -EACCES)
  		return ret;
  
@@ -215,7 +286,7 @@
  
  	if (!ucontrol->value.integer.value[0])
  		rt1320->fw_load_done = false;
-@@ -3057,8 +3180,11 @@
+@@ -3057,8 +3237,11 @@
  		return ret;
  
  	if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF &&
@@ -228,7 +299,7 @@
  
  	if (!ucontrol->value.integer.value[0])
  		rt1320->rae_update_done = false;
-@@ -3253,6 +3379,10 @@
+@@ -3253,6 +3436,10 @@
  	int retval, num_channels;
  	unsigned int sampling_rate;
  
@@ -239,7 +310,7 @@
  	dev_dbg(dai->dev, "%s %s", __func__, dai->name);
  	sdw_stream = snd_soc_dai_get_dma_data(dai, substream);
  
-@@ -3429,6 +3559,8 @@
+@@ -3429,6 +3616,8 @@
  	if (!rt1320->first_hw_init)
  		return 0;
  
@@ -248,7 +319,7 @@
  	ret = pm_runtime_resume(component->dev);
  	dev_dbg(&rt1320->sdw_slave->dev, "%s pm_runtime_resume, ret=%d", __func__, ret);
  	if (ret < 0 && ret != -EACCES)
-@@ -3560,6 +3692,7 @@
+@@ -3560,6 +3749,7 @@
  	rt1320->brown_out = 1;
  
  	INIT_WORK(&rt1320->load_dspfw_work, rt1320_load_dspfw_work);
@@ -256,7 +327,7 @@
  
  	ret =  devm_snd_soc_register_component(dev,
  				&soc_component_sdw_rt1320,
-@@ -3609,6 +3742,7 @@
+@@ -3609,6 +3799,7 @@
  {
  	struct  rt1320_sdw_priv *rt1320 = dev_get_drvdata(&slave->dev);
  
@@ -264,22 +335,32 @@
  	cancel_work_sync(&rt1320->load_dspfw_work);
  	pm_runtime_disable(&slave->dev);
  }
+@@ -3692,3 +3883,4 @@
+ MODULE_DESCRIPTION("ASoC RT1320 driver SDCA SDW");
+ MODULE_AUTHOR("Shuming Fan <shumingf@realtek.com>");
+ MODULE_LICENSE("GPL");
++MODULE_IMPORT_NS("SND_SOC_SDCA");
 --- a/sound/soc/codecs/rt1320-sdw.h
 +++ b/sound/soc/codecs/rt1320-sdw.h
-@@ -13,7 +13,7 @@
+@@ -13,7 +13,10 @@
  #include <linux/soundwire/sdw_type.h>
  #include <linux/soundwire/sdw_registers.h>
  #include <sound/soc.h>
 -#include "../../../drivers/soundwire/bus.h"
 +#include "sdw-bus.h"
++#include <sound/sdca.h>
++#include <sound/sdca_function.h>
++#include <sound/sdca_regmap.h>
  
  #define RT1320_DEV_ID 0x6981
  #define RT1321_DEV_ID 0x7045
-@@ -206,6 +206,8 @@
+@@ -206,6 +209,10 @@
  	bool fw_load_done;
  	bool rae_update_done;
  	struct work_struct load_dspfw_work;
 +	struct delayed_work auto_dspfw_work;
++	struct sdca_function_data *amp_function;
++	bool acpi_init_failed;
 +	int auto_dspfw_tries;
  	struct sdw_bpt_msg bra_msg;
  };

@@ -14,6 +14,9 @@
 #include <linux/soundwire/sdw_registers.h>
 #include <sound/soc.h>
 #include "sdw-bus.h"
+#include <sound/sdca.h>
+#include <sound/sdca_function.h>
+#include <sound/sdca_regmap.h>
 
 #define RT1320_DEV_ID 0x6981
 #define RT1321_DEV_ID 0x7045
@@ -207,6 +210,8 @@ struct rt1320_sdw_priv {
 	bool rae_update_done;
 	struct work_struct load_dspfw_work;
 	struct delayed_work auto_dspfw_work;
+	struct sdca_function_data *amp_function;
+	bool acpi_init_failed;
 	int auto_dspfw_tries;
 	struct sdw_bpt_msg bra_msg;
 };

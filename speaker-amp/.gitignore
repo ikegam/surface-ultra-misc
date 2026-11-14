@@ -1,0 +1,14 @@
+# Realtek/Microsoft data and anything generated from it stays on the local machine.
+*.dat
+*.bin
+*.zip
+*.sys
+__pycache__/
+# build output
+*.o
+*.ko
+*.mod
+*.mod.c
+.*.cmd
+modules.order
+Module.symvers

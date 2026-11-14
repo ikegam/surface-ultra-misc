@@ -1,0 +1,5 @@
+# OEM tuning data and anything generated from it stays on the local machine.
+*.xml
+*.irs
+*.conf
+*.json

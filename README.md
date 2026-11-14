@@ -25,6 +25,8 @@ Start there; the pieces below assume that setup.
 | [`sapd-lps0/`](#sapd-lps0-surface-modern-standby-notifications) | sends the Surface-specific Modern Standby notifications around suspend (experimental) | independent |
 | [`keyboard/`](#keyboard-caps-lock-lag) | Caps Lock lag; repeated keys through a key remapper | independent |
 | [`audio-jack/`](#audio-jack-headphone-detection) | headphone jack detection | independent (upstream Realtek driver) |
+| [`speaker-amp/`](#speaker-amp-windows-amp-dsp-firmware-and-tuning) | speakers: run the amps' DSP firmware and tuning from Windows | independent; works with their audio setup (UCM profile, `n1x-sdw-settle`) |
+| [`speaker-tuning/`](#speaker-tuning-dolby-tuning-as-a-pipewire-filter) | speakers: Windows Dolby tuning as a PipeWire filter (optional) | independent |
 | [`gpu-power/`](#gpu-power-nvidia-power-management-notes) | notes and probes on NVIDIA power management (nvidia-powerd, RATED_TDP) | independent |
 
 ## als: ambient light sensor
@@ -247,6 +249,65 @@ sudo ./uninstall.sh    # back to the kernel's module
 ```
 
 `install.sh` stops PipeWire for a few seconds while the card is rebuilt.
+
+## speaker-amp: Windows amp DSP firmware and tuning
+
+The speakers sound flat and thin on Linux compared with Windows. The two RT1320 amplifiers have a DSP, and on
+Windows the Realtek driver loads it with firmware and a Surface-specific tuning (EQ, speaker protection, the
+left/right voicing). Linux runs the amps without it. The kernel's `rt1320-sdw` driver can load both
+(`realtek/rt1320/rt1320_<vendor>_<product>_<sku>.dat` and `rt1320_RAE_...dat`), but no such files exist for
+this machine, and Microsoft/Realtek don't ship them for Linux.
+
+This directory builds them **from your own Windows install** and changes the driver so they load by themselves:
+
+- `extract.py` reads `RTKDAT_10EC.dat` from the Realtek SDCA driver package in the mounted Windows partition. That
+  file is a password-protected ZIP, obfuscated with a byte-chained XOR; the key and the password are found in your
+  copy of `RtkSdcaXu.sys`. For this machine (SUBSYS `0x308E10EC`) the driver uses the `Nocturne_A` set:
+  four DSP code images, two DSP parameter blocks, and one RAE tuning per amp (`FWFiles_20` for SoundWire unique
+  ID 0, `FWFiles_22` for ID 2). **No Realtek or Microsoft data is in this repository**, and the generated files stay
+  in `/usr/lib/firmware/updates/realtek/rt1320/`.
+- `module/` is `rt1320-sdw` from Linux v7.3 with `surface-rt1320.patch` (DKMS, `BUILD_EXCLUSIVE_KERNEL` `^7\.3\.`):
+  - loads the DSP firmware and the RAE tuning 10 s after the card is up, and again after resume (upstream only
+    reloads the firmware, so the tuning was lost), with a runtime-PM reference held during the download;
+  - a per-amp RAE file (`..._<unique id>.dat`), since left and right differ;
+  - one download at a time: the MediaTek controller has no BRA, so the download is byte-wise and takes seconds.
+    A bus reset or a second download during it leaves that amp's DSP dead until the next boot, which is why the
+    first load waits for the boot-time `n1x-sdw-settle` bus reset and the `alsactl` restore of the
+    `DSP FW Update` control goes through the same delayed path;
+  - checks that the DSP started, and keeps it bypassed (stock sound) if it did not.
+- `speaker-amp-gain`: their UCM profile caps the amp gain at 75 (-9 dB) because no speaker protection was loaded.
+  `install.sh` adds one `exec` line to that profile (backup kept) which raises it to 81 (-4.5 dB) only while both
+  amps run the DSP firmware.
+
+```
+sudo mount -o ro /dev/nvme0n1p3 /mnt/win   # the Windows partition
+cd speaker-amp
+sudo ./install.sh            # firmware + DKMS driver, then rebuilds the sound card
+sudo ./install.sh --no-reload  # same, takes effect at the next boot
+./status.sh                  # DSP FW / tuning / gain of both amps
+sudo ./uninstall.sh
+```
+
+The firmware only has to be extracted once; later runs keep it when Windows isn't mounted. The very first load after
+`install.sh` can fail if the amps were used with an earlier attempt; a reboot fixes that.
+
+## speaker-tuning: Dolby tuning as a PipeWire filter
+
+Optional, on top of `speaker-amp`. The Windows Dolby driver has a tuning for this machine too
+(`SOUNDWIRE_SDCAFUNCTION_10_MAN_025D_FUNC_1320_SUBSYS_308E10EC.xml`). Its speaker EQ (`audio-optimizer`) is
+disabled, so on its own it changes little; what remains is a bass enhancer and a limiter. `install.sh` converts it
+with [speaker-tuning-to-easyeffects](https://github.com/antoinecellerier/speaker-tuning-to-easyeffects) (MIT,
+fetched at a pinned commit, not vendored) into a PipeWire filter-chain on the built-in speakers, without the volume
+leveler (it pulls everything down to -26 LUFS). The XML is read from your Windows partition and nothing derived from
+it leaves the machine.
+
+```
+cd speaker-tuning
+./install.sh        # needs: sudo pacman -S lsp-plugins-lv2 calf
+./uninstall.sh
+```
+
+The PipeWire restart is followed by a restart of the desktop portals, otherwise screen sharing breaks.
 
 ## gpu-power: NVIDIA power management notes
 

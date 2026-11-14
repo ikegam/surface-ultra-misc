@@ -1,0 +1,4 @@
+# Built from Linux v7.3 sound/soc/codecs/rt1320-sdw.c with surface-rt1320.patch applied.
+ccflags-y := -I$(src)
+snd-soc-rt1320-sdw-y := rt1320-sdw.o
+obj-m := snd-soc-rt1320-sdw.o

@@ -25,6 +25,8 @@ teo-casares さんによる、この機種で Omarchy を動かす取り組み�
 | `sapd-lps0/` | サスペンド前後に Surface 固有の Modern Standby 通知を送る(試験中) | 独立 |
 | `keyboard/` | Caps Lock の遅れ、キー再マップでの連打 | 独立 |
 | `audio-jack/` | ヘッドホンジャックの検出 | 独立(上流の Realtek ドライバ) |
+| `speaker-amp/` | スピーカー: Windows のアンプ DSP ファームとチューニングで鳴らす | 独立。teo さんの音声環境(UCM プロファイル、`n1x-sdw-settle`)と組み合わせて動く |
+| `speaker-tuning/` | スピーカー: Windows の Dolby チューニングを PipeWire フィルタに(任意) | 独立 |
 | `gpu-power/` | NVIDIA の電力管理(nvidia-powerd、RATED_TDP)の調査メモと診断ツール | 独立 |
 
 ## als: 照度センサー
@@ -240,6 +242,62 @@ sudo ./uninstall.sh    # カーネル本体のモジュールに戻す
 ```
 
 `install.sh` はサウンドカードを組み直す間、PipeWire を数秒止めます。
+
+## speaker-amp: Windows のアンプ DSP ファームとチューニング
+
+Linux だと本体スピーカーの音が Windows より平板で薄い。2 個の RT1320 アンプには DSP があり、Windows では Realtek
+ドライバがそこにファームウェアと Surface 専用のチューニング(EQ、スピーカー保護、左右別の音作り)を読み込んでいる。
+Linux はそれなしで鳴らしている。カーネルの `rt1320-sdw` には読み込む仕組み
+(`realtek/rt1320/rt1320_<vendor>_<product>_<sku>.dat` と `rt1320_RAE_...dat`)があるが、この機種用のファイルは
+どこにも配られていない。
+
+このディレクトリは、それを**自分の Windows から**作り、ドライバ側で自動的に読み込ませる。
+
+- `extract.py`: マウントした Windows の Realtek SDCA ドライバから `RTKDAT_10EC.dat` を読む。中身はバイト連鎖 XOR で
+  難読化したパスワード付き ZIP で、鍵とパスワードは手元の `RtkSdcaXu.sys` から探す。この機種(SUBSYS
+  `0x308E10EC`)では `Nocturne_A` の組(DSP コード 4 本、パラメータ 2 つ、アンプごとの RAE チューニング。
+  SoundWire unique ID 0 が `FWFiles_20`、2 が `FWFiles_22`)が使われる。**Realtek・Microsoft のデータはリポジトリに
+  入っていない**。生成物は `/usr/lib/firmware/updates/realtek/rt1320/` に置くだけ。
+- `module/`: Linux v7.3 の `rt1320-sdw` に `surface-rt1320.patch` を当てたもの(DKMS、7.3 系のみ)。
+  - カード構築の 10 秒後と復帰後に DSP ファームと RAE を読み込む(本家は復帰時にファームしか読み直さず、
+    チューニングが消えていた)。ダウンロード中は runtime PM の参照を持つ。
+  - 左右で違うので RAE はアンプごとのファイル(`..._<unique id>.dat`)。
+  - ダウンロードは 1 つずつ。MediaTek のコントローラは BRA 非対応で 1 バイトずつ書くので数秒かかり、途中で
+    バスリセットや別のダウンロードが入るとそのアンプの DSP は次の起動まで動かない。そのため最初の読み込みは
+    起動時の `n1x-sdw-settle` のバスリセットを待ち、`alsactl` が `DSP FW Update` を復元したときも同じ遅延経路を通す。
+  - DSP の起動を確認し、失敗したらバイパス(素の音)のままにする。
+- `speaker-amp-gain`: teo さんの UCM プロファイルは、スピーカー保護がないためアンプ音量を 75(-9 dB)に抑えている。
+  `install.sh` はそのプロファイルに `exec` を 1 行足し(バックアップあり)、両アンプで DSP が動いているときだけ
+  81(-4.5 dB)に上げる。
+
+```
+sudo mount -o ro /dev/nvme0n1p3 /mnt/win   # Windows のパーティション
+cd speaker-amp
+sudo ./install.sh              # ファーム + DKMS ドライバ、そのあとサウンドカードを作り直す
+sudo ./install.sh --no-reload  # 同じ。次の起動から有効
+./status.sh                    # 両アンプの DSP ファーム・チューニング・音量
+sudo ./uninstall.sh
+```
+
+ファームの生成は 1 回だけでよい(Windows をマウントしていなければ既存のものを使う)。以前の試行でアンプを
+触っていると、`install.sh` 直後の最初の読み込みが失敗することがある。その場合は再起動で直る。
+
+## speaker-tuning: Dolby チューニングを PipeWire フィルタに
+
+任意で、`speaker-amp` の上に重ねる。Windows の Dolby ドライバにもこの機種用のチューニング
+(`SOUNDWIRE_SDCAFUNCTION_10_MAN_025D_FUNC_1320_SUBSYS_308E10EC.xml`)があるが、スピーカー EQ(`audio-optimizer`)が
+無効なので、単体ではあまり変わらない。残るのは低音強調とリミッタ。`install.sh` は
+[speaker-tuning-to-easyeffects](https://github.com/antoinecellerier/speaker-tuning-to-easyeffects)(MIT、固定コミットを
+取得して使い、同梱しない)で、これを本体スピーカー用の PipeWire filter-chain に変換する。音量の自動調整
+(-26 LUFS に揃えて小さくなる)は外す。XML は自分の Windows から読み、変換結果はマシンの外に出さない。
+
+```
+cd speaker-tuning
+./install.sh        # 事前に: sudo pacman -S lsp-plugins-lv2 calf
+./uninstall.sh
+```
+
+PipeWire を再起動したあとは、画面共有が壊れないようにデスクトップのポータルも再起動する。
 
 ## gpu-power: NVIDIA の電力管理のメモ
 

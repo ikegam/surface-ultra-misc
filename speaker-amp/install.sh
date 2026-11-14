@@ -1,6 +1,7 @@
 #!/bin/bash
 # Run the Surface Laptop Ultra speaker amps with their Windows DSP firmware and tuning.
-#   sudo ./install.sh [--no-reload] [WINDOWS_DIR]    (default: the mounted Windows partition)
+#   sudo ./install.sh [--no-reload] [WINDOWS_DIR]
+# Without WINDOWS_DIR it uses a mounted Windows partition, or mounts it read-only for a moment.
 # Builds the firmware from your Windows install, installs the patched rt1320 driver with DKMS,
 # and rebuilds the sound card (audio stops for a few seconds; no reboot needed).
 set -euo pipefail
@@ -18,8 +19,32 @@ GAIN=/usr/local/lib/surface-ultra-misc/speaker-amp-gain
 PKG=n1x-rt1320-sdw VER=7.3-surface1 SRC=/usr/src/$PKG-$VER
 
 # 1. firmware, from the Realtek driver in your Windows install
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-if python3 -I "$here/extract.py" "$@" "$tmp"; then
+tmp=$(mktemp -d); mnt=
+cleanup() { [ -n "$mnt" ] && umount "$mnt" && rmdir "$mnt"; rm -rf "$tmp"; }
+trap cleanup EXIT
+
+# No Windows directory given and none mounted: mount the Windows partition read-only
+# for the extraction, and unmount it again afterwards.
+windows_mounted() {
+    local m
+    for m in $(findmnt -rn -t ntfs,ntfs3,fuseblk -o TARGET); do
+        [ -d "$m/Windows/System32" ] && return 0
+    done
+    return 1
+}
+win=("$@")
+if [ ${#win[@]} = 0 ] && ! windows_mounted; then
+    for dev in $(lsblk -nrpo NAME,FSTYPE | awk '$2 == "ntfs" {print $1}'); do
+        m=$(mktemp -d)
+        if mount -o ro "$dev" "$m" 2>/dev/null; then
+            if [ -d "$m/Windows/System32" ]; then mnt=$m; win=("$m/Windows"); break; fi
+            umount "$m"
+        fi
+        rmdir "$m"
+    done
+fi
+
+if python3 -I "$here/extract.py" "${win[@]}" "$tmp"; then
     install -d "$FW"
     install -m644 "$tmp"/rt1320_*.dat "$FW/"
 elif ls "$FW"/rt1320_*Surface_Laptop_Ultra*.dat >/dev/null 2>&1; then

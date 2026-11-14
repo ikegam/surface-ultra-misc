@@ -280,7 +280,6 @@ This directory builds them **from your own Windows install** and changes the dri
   amps run the DSP firmware.
 
 ```
-sudo mount -o ro /dev/nvme0n1p3 /mnt/win   # the Windows partition
 cd speaker-amp
 sudo ./install.sh            # firmware + DKMS driver, then rebuilds the sound card
 sudo ./install.sh --no-reload  # same, takes effect at the next boot
@@ -288,7 +287,9 @@ sudo ./install.sh --no-reload  # same, takes effect at the next boot
 sudo ./uninstall.sh
 ```
 
-The firmware only has to be extracted once; later runs keep it when Windows isn't mounted. The very first load after
+The Windows partition doesn't need to be mounted: `install.sh` mounts it read-only for the extraction and
+unmounts it again (or pass a Windows directory). The firmware only has to be extracted once; later runs keep it
+if no Windows install is found. The very first load after
 `install.sh` can fail if the amps were used with an earlier attempt; a reboot fixes that.
 
 ## speaker-tuning: Dolby tuning as a PipeWire filter
@@ -298,8 +299,8 @@ Optional, on top of `speaker-amp`. The Windows Dolby driver has a tuning for thi
 disabled, so on its own it changes little; what remains is a bass enhancer and a limiter. `install.sh` converts it
 with [speaker-tuning-to-easyeffects](https://github.com/antoinecellerier/speaker-tuning-to-easyeffects) (MIT,
 fetched at a pinned commit, not vendored) into a PipeWire filter-chain on the built-in speakers, without the volume
-leveler (it pulls everything down to -26 LUFS). The XML is read from your Windows partition and nothing derived from
-it leaves the machine.
+leveler (it pulls everything down to -26 LUFS). The XML is read from your Windows partition (mounted read-only
+with `udisksctl` for a moment if it isn't, then cached) and nothing derived from it leaves the machine.
 
 ```
 cd speaker-tuning

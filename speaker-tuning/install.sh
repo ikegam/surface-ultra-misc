@@ -22,6 +22,9 @@ src=
 if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then src=$1; shift; fi
 
 xml=
+mounted=()
+cleanup() { local d; for d in "${mounted[@]}"; do udisksctl unmount -b "$d" >/dev/null 2>&1; done; }
+trap cleanup EXIT
 if [ -n "$src" ] && [ -f "$src" ]; then
     xml=$src
 elif [ -n "$src" ]; then
@@ -33,13 +36,26 @@ else
         xml=$(find_xml "$mnt/Windows")
         [ -n "$xml" ] && break
     done < <(findmnt -rn -t ntfs,ntfs3,fuseblk -o TARGET)
-    [ -n "$xml" ] || die "mount the Windows partition (read-only is fine), or pass the tuning file"
+    # Not mounted: use the copy from an earlier run, else mount read-only for a moment.
+    if [ -z "$xml" ] && [ -f "$CACHE/oem/$TUNING_XML" ]; then
+        xml=$CACHE/oem/$TUNING_XML
+    fi
+    if [ -z "$xml" ] && command -v udisksctl >/dev/null; then
+        for dev in $(lsblk -nrpo NAME,FSTYPE,MOUNTPOINT | awk '$2 == "ntfs" && $3 == "" {print $1}'); do
+            mnt=$(udisksctl mount -b "$dev" -o ro 2>/dev/null | sed -n 's/^Mounted .* at //p') || continue
+            [ -n "$mnt" ] || continue
+            mounted+=("$dev")
+            [ -d "$mnt/Windows" ] && xml=$(find_xml "$mnt/Windows")
+            [ -n "$xml" ] && break
+        done
+    fi
+    [ -n "$xml" ] || die "no Windows partition with the tuning found; pass the tuning file"
 fi
 echo "Tuning: $xml"
 
 # A private copy, so the Windows partition can be unmounted afterwards.
 mkdir -p "$CACHE/oem"
-install -m 644 "$xml" "$CACHE/oem/$TUNING_XML"
+[ "$xml" = "$CACHE/oem/$TUNING_XML" ] || install -m 644 "$xml" "$CACHE/oem/$TUNING_XML"
 
 missing=
 for p in lsp-plugins.lv2 calf.lv2; do

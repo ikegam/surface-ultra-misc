@@ -271,7 +271,6 @@ Linux はそれなしで鳴らしている。カーネルの `rt1320-sdw` には
   81(-4.5 dB)に上げる。
 
 ```
-sudo mount -o ro /dev/nvme0n1p3 /mnt/win   # Windows のパーティション
 cd speaker-amp
 sudo ./install.sh              # ファーム + DKMS ドライバ、そのあとサウンドカードを作り直す
 sudo ./install.sh --no-reload  # 同じ。次の起動から有効
@@ -279,7 +278,8 @@ sudo ./install.sh --no-reload  # 同じ。次の起動から有効
 sudo ./uninstall.sh
 ```
 
-ファームの生成は 1 回だけでよい(Windows をマウントしていなければ既存のものを使う)。以前の試行でアンプを
+Windows のパーティションはマウントしなくてよい。`install.sh` が抽出のあいだだけ読み取り専用でマウントして外す
+(Windows のディレクトリを渡してもよい)。ファームの生成は 1 回だけでよく、Windows が見つからなければ既存のものを使う。以前の試行でアンプを
 触っていると、`install.sh` 直後の最初の読み込みが失敗することがある。その場合は再起動で直る。
 
 ## speaker-tuning: Dolby チューニングを PipeWire フィルタに
@@ -289,7 +289,8 @@ sudo ./uninstall.sh
 無効なので、単体ではあまり変わらない。残るのは低音強調とリミッタ。`install.sh` は
 [speaker-tuning-to-easyeffects](https://github.com/antoinecellerier/speaker-tuning-to-easyeffects)(MIT、固定コミットを
 取得して使い、同梱しない)で、これを本体スピーカー用の PipeWire filter-chain に変換する。音量の自動調整
-(-26 LUFS に揃えて小さくなる)は外す。XML は自分の Windows から読み、変換結果はマシンの外に出さない。
+(-26 LUFS に揃えて小さくなる)は外す。XML は自分の Windows から読み(マウントされていなければ
+`udisksctl` で一時的に読み取り専用でマウントし、以後はキャッシュを使う)、変換結果はマシンの外に出さない。
 
 ```
 cd speaker-tuning

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Run by UCM when the speakers are enabled. The Surface UCM profile caps the amp gain at
 # 75 (-9 dB) because Linux used to run the amps without speaker protection. Raise it to
-# 83 (-3 dB) only while both amps actually run the DSP FW that provides that protection.
+# 85 (-1.5 dB) only while both amps actually run the DSP FW that provides that protection.
 # At boot the DSP FW loads ~10 s after the card appears, usually after this runs, so wait
 # for it in the background (UCM waits for exec to return).
 c=mt8901soundwire
@@ -13,7 +13,7 @@ dsp_on() {
 }
 raise() {
     for n in 1 2; do
-        amixer -q -c "$c" cset name="rt1320-$n FU21 Playback Volume" 83,83
+        amixer -q -c "$c" cset name="rt1320-$n FU21 Playback Volume" 85,85
     done
 }
 

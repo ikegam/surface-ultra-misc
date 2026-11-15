@@ -2667,12 +2667,18 @@ static void rt1320_auto_dspfw_work(struct work_struct *work)
 	struct snd_soc_component *component = rt1320->component;
 	int ret;
 
-	if (!component || !rt1320->hw_init || rt1320->fw_load_done)
+	if (!component || !rt1320->hw_init || rt1320->fw_load_done) {
+		dev_dbg(&rt1320->sdw_slave->dev, "auto DSP FW load: nothing to do (component %d hw_init %d loaded %d)\n",
+			!!component, rt1320->hw_init, rt1320->fw_load_done);
 		return;
+	}
 
 	ret = pm_runtime_resume_and_get(component->dev);
-	if (ret < 0 && ret != -EACCES)
+	if (ret < 0 && ret != -EACCES) {
+		dev_info(&rt1320->sdw_slave->dev, "auto DSP FW load: runtime resume failed (%d), retrying\n", ret);
+		schedule_delayed_work(&rt1320->auto_dspfw_work, msecs_to_jiffies(3000));
 		return;
+	}
 
 	if (component->card && snd_soc_card_is_instantiated(component->card) &&
 	    snd_soc_dapm_get_bias_level(snd_soc_component_to_dapm(component)) == SND_SOC_BIAS_OFF) {
@@ -2696,7 +2702,12 @@ static void rt1320_auto_dspfw_work(struct work_struct *work)
 		pm_runtime_put_autosuspend(component->dev);
 	}
 
-	if (!rt1320->fw_load_done && ++rt1320->auto_dspfw_tries < 10)
+	/*
+	 * Not attempted yet (audio was playing, so the amp wasn't idle): keep
+	 * waiting for an idle moment instead of giving up. A failed attempt
+	 * set auto_dspfw_tries to 10 above and stops here.
+	 */
+	if (!rt1320->fw_load_done && rt1320->auto_dspfw_tries < 10)
 		schedule_delayed_work(&rt1320->auto_dspfw_work, msecs_to_jiffies(3000));
 }
 

@@ -24,11 +24,19 @@ raise() {
 amixer -q -c "$c" cset name="rt1320-1 RX Channel Select" 2   # L,L
 amixer -q -c "$c" cset name="rt1320-2 RX Channel Select" 3   # R,R
 
+if [ "${1:-}" != --waited ] && ! dsp_on; then
+    # (Re)start the driver's wait for an idle moment to load the DSP FW; a no-op
+    # for an amp whose DSP already runs.
+    for n in 1 2; do
+        amixer -q -c "$c" cset name="rt1320-$n DSP FW Update" 1 2>/dev/null
+    done
+fi
+
 if dsp_on; then
     raise
 elif [ "${1:-}" != --waited ]; then
     setsid sh -c '
-        for i in $(seq 1 45); do sleep 2; "$0" --waited && exit 0; done
+        for i in $(seq 1 150); do sleep 2; "$0" --waited && exit 0; done
     ' "$0" </dev/null >/dev/null 2>&1 &
 else
     exit 1

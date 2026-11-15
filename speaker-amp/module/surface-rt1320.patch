@@ -392,7 +392,7 @@
  	/* DSP clock switches to PLL */
  	regmap_write(rt1320->regmap, 0xc081, 0xfc);
  	/* pass DSP settings */
-@@ -2329,12 +2620,98 @@
+@@ -2329,12 +2620,109 @@
  		container_of(work, struct rt1320_sdw_priv, load_dspfw_work);
  	int ret;
  
@@ -441,12 +441,18 @@
 +	struct snd_soc_component *component = rt1320->component;
 +	int ret;
 +
-+	if (!component || !rt1320->hw_init || rt1320->fw_load_done)
++	if (!component || !rt1320->hw_init || rt1320->fw_load_done) {
++		dev_dbg(&rt1320->sdw_slave->dev, "auto DSP FW load: nothing to do (component %d hw_init %d loaded %d)\n",
++			!!component, rt1320->hw_init, rt1320->fw_load_done);
 +		return;
++	}
 +
 +	ret = pm_runtime_resume_and_get(component->dev);
-+	if (ret < 0 && ret != -EACCES)
++	if (ret < 0 && ret != -EACCES) {
++		dev_info(&rt1320->sdw_slave->dev, "auto DSP FW load: runtime resume failed (%d), retrying\n", ret);
++		schedule_delayed_work(&rt1320->auto_dspfw_work, msecs_to_jiffies(3000));
 +		return;
++	}
 +
 +	if (component->card && snd_soc_card_is_instantiated(component->card) &&
 +	    snd_soc_dapm_get_bias_level(snd_soc_component_to_dapm(component)) == SND_SOC_BIAS_OFF) {
@@ -470,7 +476,12 @@
 +		pm_runtime_put_autosuspend(component->dev);
 +	}
 +
-+	if (!rt1320->fw_load_done && ++rt1320->auto_dspfw_tries < 10)
++	/*
++	 * Not attempted yet (audio was playing, so the amp wasn't idle): keep
++	 * waiting for an idle moment instead of giving up. A failed attempt
++	 * set auto_dspfw_tries to 10 above and stops here.
++	 */
++	if (!rt1320->fw_load_done && rt1320->auto_dspfw_tries < 10)
 +		schedule_delayed_work(&rt1320->auto_dspfw_work, msecs_to_jiffies(3000));
 +}
 +
@@ -493,7 +504,7 @@
  }
  
  static void rt1320_vc_preset(struct rt1320_sdw_priv *rt1320)
-@@ -2526,6 +2903,8 @@
+@@ -2526,6 +2914,8 @@
  	rt1320->first_hw_init = true;
  	rt1320->hw_init = true;
  
@@ -502,7 +513,7 @@
  	pm_runtime_put_autosuspend(&slave->dev);
  
  	dev_dbg(&slave->dev, "%s hw_init complete\n", __func__);
-@@ -3019,9 +3398,18 @@
+@@ -3019,9 +3409,18 @@
  	if (ret < 0 && ret != -EACCES)
  		return ret;
  
@@ -523,7 +534,7 @@
  
  	if (!ucontrol->value.integer.value[0])
  		rt1320->fw_load_done = false;
-@@ -3057,8 +3445,11 @@
+@@ -3057,8 +3456,11 @@
  		return ret;
  
  	if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF &&
@@ -536,7 +547,7 @@
  
  	if (!ucontrol->value.integer.value[0])
  		rt1320->rae_update_done = false;
-@@ -3253,6 +3644,10 @@
+@@ -3253,6 +3655,10 @@
  	int retval, num_channels;
  	unsigned int sampling_rate;
  
@@ -547,7 +558,7 @@
  	dev_dbg(dai->dev, "%s %s", __func__, dai->name);
  	sdw_stream = snd_soc_dai_get_dma_data(dai, substream);
  
-@@ -3429,6 +3824,8 @@
+@@ -3429,6 +3835,8 @@
  	if (!rt1320->first_hw_init)
  		return 0;
  
@@ -556,7 +567,7 @@
  	ret = pm_runtime_resume(component->dev);
  	dev_dbg(&rt1320->sdw_slave->dev, "%s pm_runtime_resume, ret=%d", __func__, ret);
  	if (ret < 0 && ret != -EACCES)
-@@ -3560,6 +3957,7 @@
+@@ -3560,6 +3968,7 @@
  	rt1320->brown_out = 1;
  
  	INIT_WORK(&rt1320->load_dspfw_work, rt1320_load_dspfw_work);
@@ -564,7 +575,7 @@
  
  	ret =  devm_snd_soc_register_component(dev,
  				&soc_component_sdw_rt1320,
-@@ -3609,6 +4007,7 @@
+@@ -3609,6 +4018,7 @@
  {
  	struct  rt1320_sdw_priv *rt1320 = dev_get_drvdata(&slave->dev);
  

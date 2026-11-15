@@ -267,17 +267,21 @@ This directory builds them **from your own Windows install** and changes the dri
   ID 0, `FWFiles_22` for ID 2). **No Realtek or Microsoft data is in this repository**, and the generated files stay
   in `/usr/lib/firmware/updates/realtek/rt1320/`.
 - `module/` is `rt1320-sdw` from Linux v7.3 with `surface-rt1320.patch` (DKMS, `BUILD_EXCLUSIVE_KERNEL` `^7\.3\.`):
-  - loads the DSP firmware and the RAE tuning 10 s after the card is up, and again after resume (upstream only
-    reloads the firmware, so the tuning was lost), with a runtime-PM reference held during the download;
+  - starts the DSP the way Realtek's Windows driver does for this machine (found by static analysis of
+    `RtkSdcaXu.sys`): hold the amp, fully reset the DSP (back to ROM, clock and core resets pulsed), download the
+    code, send the AFX parameter blocks with their header last, run, wait for the `0x3fc2bfc4` handshake, then the
+    post-start setup. The stock Linux sequence starts the DSP only if it was left in a clean state; the amps keep
+    power across reboots and even power-off, so after a SoC crash in s2idle it never came up again;
+  - keeps mixer writes away from the amps while that runs: UCM enabling the speakers when PipeWire starts made the
+    start fail;
+  - loads the DSP firmware and the RAE tuning 10 s after the card is up (after the boot-time `n1x-sdw-settle` bus
+    reset; the `alsactl` restore of `DSP FW Update` goes through the same delayed path), one amp at a time, and
+    again after resume (upstream only reloads the firmware, so the tuning was lost);
   - a per-amp RAE file (`..._<unique id>.dat`), since left and right differ;
-  - one download at a time: the MediaTek controller has no BRA, so the download is byte-wise and takes seconds.
-    A bus reset or a second download during it leaves that amp's DSP dead until the next boot, which is why the
-    first load waits for the boot-time `n1x-sdw-settle` bus reset and the `alsactl` restore of the
-    `DSP FW Update` control goes through the same delayed path;
-  - checks that the DSP started, and keeps it bypassed (stock sound) if it did not.
-  - `acpi_init_table=1` (off by default) also applies the amp function's SDCA initialization table from ACPI,
-    as Windows does. Applied after the generic preset it leaves the speakers silent, so it is only for
-    experiments.
+  - trusts a DSP that reports itself running only if its mailbox is idle, and keeps it bypassed (stock sound) if it
+    does not start, logging the DSP registers.
+- `amp-power-cycle.sh` (rescue, normally not needed) power-cycles both amps through their LDO enables, as ACPI
+  `CNT0._PS3`/`_PS0` do on Windows (GPIO 74 = amp 1, GPIO 47 = amp 2); Linux never calls those.
 - `speaker-amp-gain` also sets the amps' channel routing as Windows does (left amp `L,L`, right amp `R,R`; the
   driver default `L,R` on both collapses the stereo image to the middle).
 - `speaker-amp-gain`: their UCM profile caps the amp gain at 75 (-9 dB) because no speaker protection was loaded.

@@ -2120,14 +2120,155 @@ _exit_:
 	return ret;
 }
 
+/* Log the DSP control/status registers, to see where a failed start stopped. */
+static void rt1320_dsp_dump(struct rt1320_sdw_priv *rt1320, const char *when)
+{
+	static const unsigned int regs[] = {
+		0xf01e, 0xc081, 0xc5c3, 0xc5c8, 0xe803, 0xe80b, 0xe83f,
+		0x3fc2bfc0, 0x3fc2bfc4, 0x3fc2bfc8, 0x3fc2bfc9, 0x3fc2bfca, 0x3fc2bfcb,
+		0x3fc2bf80, 0x3fc2ab80, 0x3fc2ab81, 0x3fc2ab82, 0x3fc2ab83,
+		RT1320_KR0_STATUS_CNT, RT1320_KR0_INT_READY,
+	};
+	struct device *dev = &rt1320->sdw_slave->dev;
+	unsigned int i, val;
+	char buf[512];
+	int n = 0;
+
+	regcache_cache_bypass(rt1320->regmap, true);
+	for (i = 0; i < ARRAY_SIZE(regs); i++) {
+		if (regmap_read(rt1320->regmap, regs[i], &val))
+			val = 0xdead;
+		n += scnprintf(buf + n, sizeof(buf) - n, " %x=%02x", regs[i], val);
+	}
+	regcache_cache_bypass(rt1320->regmap, false);
+	if (!strcmp(when, "before download"))
+		dev_dbg(dev, "dsp %s:%s\n", when, buf);
+	else
+		dev_info(dev, "dsp %s:%s\n", when, buf);
+}
+
+/*
+ * Start the DSP the way Realtek's Windows driver (RtkSdcaXu) does for this
+ * platform: hold the amp, fully reset the DSP, download, send the AFX
+ * parameter blocks header last, run, wait for the 0x3fc2bfc4 handshake, then
+ * the post-start setup. The stock sequence never brought the DSP up here once
+ * it had been left in a bad state (e.g. by a SoC crash), and the amps keep
+ * power across reboots and power-off.
+ */
+static bool win_start = true;
+module_param(win_start, bool, 0644);
+MODULE_PARM_DESC(win_start, "Use the Windows driver's DSP start sequence (RT1320)");
+
+static void rt1320_dsp_hold(struct rt1320_sdw_priv *rt1320)
+{
+	unsigned int v = 0;
+	int i;
+
+	regmap_update_bits(rt1320->regmap, 0xd470, 0x80, 0x00);
+	regmap_update_bits(rt1320->regmap, 0xc01a, 0x40, 0x40);
+	regmap_update_bits(rt1320->regmap, 0xc5fb, 0x02, 0x00);
+	for (i = 0; i < 100; i++) {
+		regmap_read(rt1320->regmap, 0xc560, &v);
+		if (v > 0x17)
+			break;
+		usleep_range(10000, 11000);
+	}
+	dev_dbg(&rt1320->sdw_slave->dev, "dsp hold: 0xc560=%#x after %d ms\n", v, i * 10);
+}
+
+static void rt1320_dsp_release_holds(struct rt1320_sdw_priv *rt1320)
+{
+	regmap_update_bits(rt1320->regmap, 0xc01a, 0x40, 0x00);
+	regmap_update_bits(rt1320->regmap, 0xc5fb, 0x02, 0x02);
+}
+
+/*
+ * Keep mixer writes (UCM enabling the speakers when PipeWire starts) away from
+ * the amps while the DSP downloads and starts: they made the start fail.
+ */
+static struct rw_semaphore *rt1320_controls_lock(struct rt1320_sdw_priv *rt1320)
+{
+	struct snd_soc_component *component = rt1320->component;
+
+	if (!component || !component->card || !component->card->snd_card)
+		return NULL;
+	down_write(&component->card->snd_card->controls_rwsem);
+	return &component->card->snd_card->controls_rwsem;
+}
+
+/* RtkSdcaXu FUN_140071150: stall (f01e.0, d470.5, d470[3:2]) or run the DSP */
+static void rt1320_dsp_stall(struct rt1320_sdw_priv *rt1320, bool stall)
+{
+	if (stall) {
+		regmap_update_bits(rt1320->regmap, 0xf01e, 0x01, 0x01);
+		regmap_update_bits(rt1320->regmap, 0xd470, 0x20, 0x00);
+		regmap_update_bits(rt1320->regmap, 0xd470, 0x0c, 0x00);
+	} else {
+		regmap_update_bits(rt1320->regmap, 0xd470, 0x20, 0x20);
+		regmap_update_bits(rt1320->regmap, 0xd470, 0x0c, 0x0c);
+		regmap_update_bits(rt1320->regmap, 0xf01e, 0x01, 0x00);
+	}
+}
+
+/*
+ * RtkSdcaXu FUN_14006d8c0: full DSP reset, done by Windows before a load when
+ * the firmware in amp RAM can't be trusted. Back to ROM, ext_entry cleared,
+ * clock and core resets pulsed; 0xd613 bit 1 is Windows' "FW loaded" flag.
+ */
+static void rt1320_dsp_full_reset(struct rt1320_sdw_priv *rt1320)
+{
+	rt1320_dsp_stall(rt1320, true);
+	regmap_update_bits(rt1320->regmap, 0xc081, 0xf0, 0x00);
+	regmap_update_bits(rt1320->regmap, 0xc081, 0xf0, 0xf0);
+	regmap_update_bits(rt1320->regmap, 0xf01e, 0x80, 0x80);
+	regmap_update_bits(rt1320->regmap, 0x3fc2bfc0, 0x08, 0x00);
+	regmap_write(rt1320->regmap, 0xd487, 0x0b);
+	regmap_write(rt1320->regmap, 0xd487, 0x3b);
+	regmap_write(rt1320->regmap, 0xc060, 0x99);
+	regmap_update_bits(rt1320->regmap, 0xc040, 0x01, 0x00);
+	regmap_update_bits(rt1320->regmap, 0xc040, 0x01, 0x01);
+	regmap_update_bits(rt1320->regmap, 0xd613, 0x02, 0x00);
+}
+
+static void rt1320_write_u32(struct rt1320_sdw_priv *rt1320, unsigned int addr, u32 v)
+{
+	int i;
+
+	for (i = 0; i < 4; i++)
+		regmap_write(rt1320->regmap, addr + i, (v >> (8 * i)) & 0xff);
+}
+
 /* DSP control as rt1320_vc_blind_write leaves it: DSP halted, audio bypasses it */
 static void rt1320_dsp_bypass(struct rt1320_sdw_priv *rt1320)
 {
 	regcache_cache_bypass(rt1320->regmap, true);
+	if (win_start) {
+		/*
+		 * RtkSdcaXu's stop: audio back to the bypass path, tell the DSP,
+		 * then stall it. The DSP clock (0xc081) is not touched while the
+		 * DSP may still run: switching it under a running DSP wedged the
+		 * amp's memory bus (reads returned 0xdeadbeef).
+		 */
+		regmap_write(rt1320->regmap, 0xc5c3, 0xf2);
+		regmap_write(rt1320->regmap, 0xc5c8, 0x03);
+		regmap_write(rt1320->regmap, 0xd470, 0xc8);
+		regmap_write(rt1320->regmap, 0x3fc2bfc4, 0x03);
+		rt1320_dsp_stall(rt1320, true);
+		rt1320_dsp_release_holds(rt1320);
+		regcache_cache_bypass(rt1320->regmap, false);
+		rt1320->fw_load_done = false;
+		return;
+	}
 	regmap_write(rt1320->regmap, 0xc5c3, 0xf2);
 	regmap_write(rt1320->regmap, 0xc5c8, 0x03);
 	regmap_write(rt1320->regmap, 0xc081, 0xfe);
+	/*
+	 * Halt the DSP and hold its core in reset, as RtkSdcaXu does before a
+	 * download: 0xf01e bit 0 = 1, 0xd470 bit 5 = 0 and bits 3:2 = 0. Without
+	 * this a DSP left running (e.g. by a SoC crash) never restarts.
+	 */
 	regmap_update_bits(rt1320->regmap, 0xf01e, 0x1, 0x1);
+	regmap_update_bits(rt1320->regmap, 0xd470, 0x2c, 0x00);
 	regmap_write(rt1320->regmap, 0x3fc2bfc0, 0x07);
 	regcache_cache_bypass(rt1320->regmap, false);
 	rt1320->fw_load_done = false;
@@ -2161,6 +2302,8 @@ struct rt1320_dspfwheader {
 	int len_vendor, len_product, len_sku;
 	unsigned char boot_mode = 0; /* 0: from RAM; 1: from ROM */
 	unsigned char has_0x3fc00000 = 0;
+	struct { unsigned int addr, len; const unsigned char *buf; } afx[2];
+	int nafx = 0;
 	char filename[512];
 
 	dmi_vendor = dmi_get_system_info(DMI_SYS_VENDOR);
@@ -2193,14 +2336,33 @@ struct rt1320_dspfwheader {
 	rt1320_pde_transition_delay(rt1320, FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23, 0x00);
 
 	if (rt1320_dspfw_status(rt1320)) {
-		dev_dbg(dev, "%s, DSP FW was already\n", __func__);
-		rt1320->fw_load_done = true;
-		goto _exit_;
+		unsigned int busy = 0;
+
+		/* the amps keep power across reboots: trust a running DSP only if its mailbox is idle */
+		if (rt1320->dev_id == RT1320_DEV_ID && win_start)
+			regmap_read(rt1320->regmap, RT1320_CMD_ID, &busy);
+		if (!busy) {
+			dev_info(dev, "%s: DSP FW already running\n", __func__);
+			rt1320->fw_load_done = true;
+			goto _exit_;
+		}
+		dev_info(dev, "%s: DSP FW flagged ready but mailbox busy, reloading\n", __func__);
 	}
 
 	/* start from the preset state, also after an earlier failed attempt */
-	if (rt1320->dev_id == RT1320_DEV_ID)
-		rt1320_dsp_bypass(rt1320);
+	if (rt1320->dev_id == RT1320_DEV_ID) {
+		rt1320_dsp_dump(rt1320, "before download");
+		if (win_start) {
+			/* as RtkSdcaXu: hold, then a full reset that stalls the DSP first */
+			regcache_cache_bypass(rt1320->regmap, true);
+			rt1320_dsp_hold(rt1320);
+			rt1320_dsp_full_reset(rt1320);
+			regcache_cache_bypass(rt1320->regmap, false);
+			rt1320->fw_load_done = false;
+		} else {
+			rt1320_dsp_bypass(rt1320);
+		}
+	}
 
 	request_firmware(&fw, filename, dev);
 	if (fw) {
@@ -2235,6 +2397,16 @@ struct rt1320_dspfwheader {
 			sec[i].addr = ptr_img->addr;
 			sec[i].len = ptr_img->size - hdr_size;
 			sec[i].buf = fw_data + hdr_size;
+
+			/* AFX parameter blocks: written after the code, header last */
+			if (win_start && rt1320->dev_id == RT1320_DEV_ID && nafx < 2 &&
+			    (sec[i].addr == 0x3fc2ab80 || sec[i].addr == 0x3fc2b780) &&
+			    sec[i].len > 4) {
+				afx[nafx].addr = sec[i].addr;
+				afx[nafx].buf = sec[i].buf;
+				afx[nafx++].len = sec[i].len;
+				sec[i].len = 0;
+			}
 
 			dev_dbg(dev, "%s, hdr_size=%d, sec[%d].buf[0]=0x%x\n",
 				__func__, hdr_size, i, sec[i].buf[0]);
@@ -2286,6 +2458,34 @@ struct rt1320_dspfwheader {
 			dev_dbg(dev, "%s, BRA downloading FW done..\n", __func__);
 		}
 
+		/* read back the start and end of each section: did the download land? */
+		for (i = 0; i < fwheader->num; i++) {
+			unsigned int j, v, bad = 0, n = min_t(unsigned int, sec[i].len, 8);
+
+			for (j = 0; j < n; j++) {
+				regmap_read(rt1320->regmap, sec[i].addr + j, &v);
+				bad += (v & 0xff) != sec[i].buf[j];
+				regmap_read(rt1320->regmap, sec[i].addr + sec[i].len - 1 - j, &v);
+				bad += (v & 0xff) != sec[i].buf[sec[i].len - 1 - j];
+			}
+			dev_dbg(dev, "dsp section %#x len %u: %u/%u readback mismatches\n",
+				 sec[i].addr, sec[i].len, bad, 2 * n);
+		}
+
+		if (nafx) {
+			unsigned int k, j;
+
+			rt1320_write_u32(rt1320, 0x3fc2ab80, 0);
+			rt1320_write_u32(rt1320, 0x3fc2b780, 0);
+			for (k = 0; k < nafx; k++) {
+				for (j = 4; j < afx[k].len; j++)
+					regmap_write(rt1320->regmap, afx[k].addr + j, afx[k].buf[j]);
+				for (j = 0; j < 4; j++)
+					regmap_write(rt1320->regmap, afx[k].addr + j, afx[k].buf[j]);
+			}
+			dev_dbg(dev, "dsp: %d AFX blocks written, header last\n", nafx);
+		}
+
 		regcache_cache_bypass(rt1320->regmap, false);
 
 		if (!dev_fw_match) {
@@ -2299,6 +2499,53 @@ struct rt1320_dspfwheader {
 
 	switch (rt1320->dev_id) {
 	case RT1320_DEV_ID:
+		if (win_start) {
+			unsigned int v = 0, k;
+
+			/* RtkSdcaXu start for this SSID (FUN_14006ad38 / FUN_1400677a0) */
+			regmap_update_bits(rt1320->regmap, 0x3fc2bfc0, 0x08, 0x08);
+			regmap_write(rt1320->regmap, 0x3fc2bfc4, 0x00);
+			regmap_read(rt1320->regmap, 0xc081, &v);
+			if (v & 0x03) {
+				rt1320_dsp_hold(rt1320);
+				rt1320_dsp_stall(rt1320, true);
+				regmap_update_bits(rt1320->regmap, 0xc081, 0x03, 0x00);
+			}
+			rt1320_dsp_stall(rt1320, false);
+			regmap_update_bits(rt1320->regmap, 0x3fc2bfc0, 0xc0, 0x00);
+			regmap_write(rt1320->regmap, 0xf015, 0x02);
+			msleep(100);
+			for (k = 0; k < 100; k++) {
+				regmap_read(rt1320->regmap, 0x3fc2bfc4, &v);
+				if (v & 0x01)
+					break;
+				msleep(20);
+			}
+			dev_info(dev, "dsp start: 0x3fc2bfc4=%#x after %u ms (bias %d, card %s)\n", v, 100 + k * 20,
+				 snd_soc_dapm_get_bias_level(dapm),
+				 rt1320->component->card ? rt1320->component->card->name : "-");
+			regmap_update_bits(rt1320->regmap, 0xd613, 0x02, 0x02);
+			rt1320_dsp_release_holds(rt1320);
+
+			rt1320_dsp_hold(rt1320);
+			regmap_write(rt1320->regmap, 0xd470, 0xec);
+			if (rt1320->sdw_slave->id.unique_id == 0) {
+				regmap_write(rt1320->regmap, 0x1000cc0a, 0x00);
+				regmap_write(rt1320->regmap, 0x1000cd95, 0x00);
+				regmap_write(rt1320->regmap, 0x1000cc00, 0x00);
+			} else {
+				regmap_write(rt1320->regmap, 0x1000cc12, 0x00);
+				regmap_write(rt1320->regmap, 0x1000cc03, 0x00);
+				regmap_write(rt1320->regmap, 0x1000cc06, 0x00);
+			}
+			rt1320_write_u32(rt1320, 0x3fc2bfc4, 1);
+			regmap_write(rt1320->regmap, 0xc5c3, 0xf3);
+			regmap_write(rt1320->regmap, 0xc5c8, 0x05);
+			rt1320_dsp_release_holds(rt1320);
+			break;
+		}
+		/* release the DSP core reset taken in rt1320_dsp_bypass() */
+		regmap_update_bits(rt1320->regmap, 0xd470, 0x2c, 0x2c);
 		/* run RAM code */
 		regmap_read(rt1320->regmap, 0x3fc2bfc0, &val);
 		val |= 0x8;
@@ -2334,14 +2581,19 @@ struct rt1320_dspfwheader {
 	}
 
 	/* enable DSP FW */
-	regmap_write(rt1320->regmap, 0xc081, 0xfc);
-	regmap_update_bits(rt1320->regmap, 0xf01e, 0x1, 0x0);
+	if (!(rt1320->dev_id == RT1320_DEV_ID && win_start)) {
+		regmap_write(rt1320->regmap, 0xc081, 0xfc);
+		regmap_update_bits(rt1320->regmap, 0xf01e, 0x1, 0x0);
+	}
 
 	/* RsRatio should restore into DSP FW when FW was ready */
 	rt1320_invrs_load(rt1320);
 
 	if (rt1320->dev_id == RT1320_DEV_ID && rt1320_check_fw_ready(rt1320) < 0) {
 		dev_warn(dev, "%s: DSP FW did not start, keeping the DSP bypassed\n", __func__);
+		rt1320_dsp_dump(rt1320, "after failed start");
+		msleep(200);
+		rt1320_dsp_dump(rt1320, "200 ms later");
 		rt1320_dsp_bypass(rt1320);
 		goto _exit_;
 	}
@@ -2382,13 +2634,20 @@ static void rt1320_load_dspfw_work(struct work_struct *work)
 		return;
 
 	dev_dbg(&rt1320->sdw_slave->dev, "%s, Starting to reload DSP FW", __func__);
-	mutex_lock(&rt1320_dspfw_mutex);
-	rt1320_dspfw_load_code(rt1320);
+	{
+		struct rw_semaphore *ctl;
 
-	/* the tuning lives in amp RAM too: restore it with the DSP FW */
-	if (auto_dspfw && rt1320->fw_load_done)
-		rt1320_rae_load(rt1320);
-	mutex_unlock(&rt1320_dspfw_mutex);
+		ctl = rt1320_controls_lock(rt1320);
+		mutex_lock(&rt1320_dspfw_mutex);
+		rt1320_dspfw_load_code(rt1320);
+
+		/* the tuning lives in amp RAM too: restore it with the DSP FW */
+		if (auto_dspfw && rt1320->fw_load_done)
+			rt1320_rae_load(rt1320);
+		mutex_unlock(&rt1320_dspfw_mutex);
+		if (ctl)
+			up_write(ctl);
+	}
 
 	if (ret >= 0) {
 		pm_runtime_mark_last_busy(rt1320->component->dev);
@@ -2417,11 +2676,17 @@ static void rt1320_auto_dspfw_work(struct work_struct *work)
 
 	if (component->card && snd_soc_card_is_instantiated(component->card) &&
 	    snd_soc_dapm_get_bias_level(snd_soc_component_to_dapm(component)) == SND_SOC_BIAS_OFF) {
+		struct rw_semaphore *ctl;
+
+		/* same order as a control put: controls_rwsem, then rt1320_dspfw_mutex */
+		ctl = rt1320_controls_lock(rt1320);
 		mutex_lock(&rt1320_dspfw_mutex);
 		rt1320_dspfw_load_code(rt1320);
 		if (rt1320->fw_load_done)
 			rt1320_rae_load(rt1320);
 		mutex_unlock(&rt1320_dspfw_mutex);
+		if (ctl)
+			up_write(ctl);
 		/* attempted: a DSP that did not start won't on a retry either */
 		rt1320->auto_dspfw_tries = 10;
 	}
@@ -2532,57 +2797,6 @@ static void rt1321_preset(struct rt1320_sdw_priv *rt1320)
 	}
 }
 
-static bool acpi_init_table;
-module_param(acpi_init_table, bool, 0644);
-MODULE_PARM_DESC(acpi_init_table, "Apply the firmware's SDCA initialization table after the preset (experimental: leaves the speakers silent here)");
-
-/*
- * The platform firmware describes the amp function's initialization writes
- * (gains, protection thresholds, DSP parameters) in the DisCo table; Windows
- * applies them at function init. Apply them after the generic preset, which
- * they override.
- */
-static void rt1320_apply_init_table(struct rt1320_sdw_priv *rt1320)
-{
-	struct sdw_slave *slave = rt1320->sdw_slave;
-	struct device *dev = &slave->dev;
-	struct sdca_function_data *function;
-	int i, ret;
-
-	if (!acpi_init_table || rt1320->acpi_init_failed)
-		return;
-
-	if (!rt1320->amp_function) {
-		for (i = 0; i < slave->sdca_data.num_functions; i++)
-			if (slave->sdca_data.function[i].adr == FUNC_NUM_AMP)
-				break;
-		if (i == slave->sdca_data.num_functions)
-			goto fail;
-
-		function = devm_kzalloc(dev, sizeof(*function), GFP_KERNEL);
-		if (!function)
-			goto fail;
-		function->desc = &slave->sdca_data.function[i];
-		ret = sdca_parse_function(dev, function);
-		if (ret || !function->num_init_table) {
-			dev_warn(dev, "%s: no usable SDCA init table (%d)\n", __func__, ret);
-			goto fail;
-		}
-		rt1320->amp_function = function;
-	}
-
-	ret = sdca_regmap_write_init(dev, rt1320->regmap, rt1320->amp_function);
-	if (ret)
-		dev_warn(dev, "%s: SDCA init table write failed: %d\n", __func__, ret);
-	else
-		dev_info(dev, "applied %d SDCA init table writes\n",
-			 rt1320->amp_function->num_init_table);
-	return;
-
-fail:
-	rt1320->acpi_init_failed = true;
-}
-
 static int rt1320_io_init(struct device *dev, struct sdw_slave *slave)
 {
 	struct rt1320_sdw_priv *rt1320 = dev_get_drvdata(dev);
@@ -2650,12 +2864,6 @@ static int rt1320_io_init(struct device *dev, struct sdw_slave *slave)
 			break;
 		default:
 			dev_err(dev, "%s: Unknown device ID %d\n", __func__, rt1320->dev_id);
-		}
-
-		if (rt1320->dev_id == RT1320_DEV_ID) {
-			regcache_cache_bypass(rt1320->regmap, true);
-			rt1320_apply_init_table(rt1320);
-			regcache_cache_bypass(rt1320->regmap, rt1320->first_hw_init);
 		}
 
 		regmap_write(rt1320->regmap,
@@ -3887,4 +4095,3 @@ module_sdw_driver(rt1320_sdw_driver);
 MODULE_DESCRIPTION("ASoC RT1320 driver SDCA SDW");
 MODULE_AUTHOR("Shuming Fan <shumingf@realtek.com>");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS("SND_SOC_SDCA");

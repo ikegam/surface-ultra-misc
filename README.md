@@ -280,8 +280,13 @@ This directory builds them **from your own Windows install** and changes the dri
   - a per-amp RAE file (`..._<unique id>.dat`), since left and right differ;
   - trusts a DSP that reports itself running only if its mailbox is idle, and keeps it bypassed (stock sound) if it
     does not start, logging the DSP registers.
+  - sends a 2-channel microphone capture on DP8 only. Stock code always adds DP8 + DP10 (4 channels), but the bus
+    reserves room for 2: DP10 then overlaps the speaker data when the microphone starts first (a call), giving a
+    data bus clash, crackle and one amp dropping out. The host only ever read DP8, so the mic sound is unchanged.
 - `amp-power-cycle.sh` (rescue, normally not needed) power-cycles both amps through their LDO enables, as ACPI
-  `CNT0._PS3`/`_PS0` do on Windows (GPIO 74 = amp 1, GPIO 47 = amp 2); Linux never calls those.
+  `CNT0._PS3`/`_PS0` do on Windows (GPIO 74 = amp 1, GPIO 47 = amp 2); Linux never calls those. Use it when the
+  speakers crackle or drop out after a bus error: a module reload alone leaves the amps in that state. Module
+  options can follow (e.g. `auto_dspfw=0`).
 - `speaker-amp-gain` also sets the amps' channel routing as Windows does (left amp `L,L`, right amp `R,R`; the
   driver default `L,R` on both collapses the stereo image to the middle).
 - `speaker-amp-gain`: their UCM profile caps the amp gain at 75 (-9 dB) because no speaker protection was loaded.

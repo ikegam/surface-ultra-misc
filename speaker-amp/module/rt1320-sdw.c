@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //
 // Modified for the Microsoft Surface Laptop Ultra (surface-ultra-misc/speaker-amp):
-// per-amp RAE tuning files and automatic DSP FW/RAE loading. See surface-rt1320.patch.
+// per-amp RAE tuning files, automatic DSP FW/RAE loading, 2-channel DMIC on DP8 only. See surface-rt1320.patch.
 //
 // rt1320-sdw.c -- rt1320 SDCA ALSA SoC amplifier audio driver
 //
@@ -3656,7 +3656,7 @@ static int rt1320_sdw_hw_params(struct snd_pcm_substream *substream,
 	struct sdw_port_config port_config;
 	struct sdw_port_config dmic_port_config[2];
 	struct sdw_stream_runtime *sdw_stream;
-	int retval, num_channels;
+	int retval, num_channels, rt1320_dmic_ports = 2;
 	unsigned int sampling_rate;
 
 	/* don't start a stream while the DSP FW is being downloaded */
@@ -3690,6 +3690,21 @@ static int rt1320_sdw_hw_params(struct snd_pcm_substream *substream,
 				dmic_port_config[0].num = 8;
 				dmic_port_config[1].ch_mask = BIT(0) | BIT(1);
 				dmic_port_config[1].num = 10;
+				/*
+				 * A 2-channel capture gets DP8 only. The bus
+				 * reserves bandwidth by the stream's channel
+				 * count (2 x 24 bits), but DP8 + DP10 send 4
+				 * channels: DP10 then lands on the slot the
+				 * allocator gives the next stream. When the
+				 * microphone starts before the speakers, that
+				 * is the speaker data (DP1): a data bus clash,
+				 * crackle, and one amp dropping out. The host
+				 * only ever read DP8's slot, so nothing is lost.
+				 */
+				if (params_channels(params) <= 2)
+					rt1320_dmic_ports = 1;
+				else
+					rt1320_dmic_ports = 2;
 				break;
 			case RT1321_DEV_ID:
 				num_channels = params_channels(params);
@@ -3710,7 +3725,7 @@ static int rt1320_sdw_hw_params(struct snd_pcm_substream *substream,
 		switch (rt1320->dev_id) {
 		case RT1320_DEV_ID:
 			retval = sdw_stream_add_slave(rt1320->sdw_slave, &stream_config,
-				dmic_port_config, 2, sdw_stream);
+				dmic_port_config, rt1320_dmic_ports, sdw_stream);
 			break;
 		case RT1321_DEV_ID:
 			retval = sdw_stream_add_slave(rt1320->sdw_slave, &stream_config,

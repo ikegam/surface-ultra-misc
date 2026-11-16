@@ -268,7 +268,8 @@ This directory builds them **from your own Windows install** and changes the dri
   in `/usr/lib/firmware/updates/realtek/rt1320/`.
 - `module/` is `rt1320-sdw` from Linux v7.3 with `surface-rt1320.patch` (DKMS, `BUILD_EXCLUSIVE_KERNEL` `^7\.3\.`):
   - starts the DSP the way Realtek's Windows driver does for this machine (found by static analysis of
-    `RtkSdcaXu.sys`): hold the amp, fully reset the DSP (back to ROM, clock and core resets pulsed), download the
+    `RtkSdcaXu.sys`): hold the amp, fully reset the DSP (back to ROM, clock and core resets pulsed; skipped on a
+    freshly powered amp, `0xd613` = 0), download the
     code, send the AFX parameter blocks with their header last, run, wait for the `0x3fc2bfc4` handshake, then the
     post-start setup. The stock Linux sequence starts the DSP only if it was left in a clean state; the amps keep
     power across reboots and even power-off, so after a SoC crash in s2idle it never came up again;
@@ -283,6 +284,11 @@ This directory builds them **from your own Windows install** and changes the dri
   - sends a 2-channel microphone capture on DP8 only. Stock code always adds DP8 + DP10 (4 channels), but the bus
     reserves room for 2: DP10 then overlaps the speaker data when the microphone starts first (a call), giving a
     data bus clash, crackle and one amp dropping out. The host only ever read DP8, so the mic sound is unchanged.
+  - never re-inits a live DSP, as on Windows: the DSP is stalled before the init preset (module load, reload) and at
+    remove. Keeps the amp function in PS0 from the DSP download through the RAE load, waits for PDE23 up to the
+    ACPI maximum (8 s) there and skips the load if it doesn't get there, then gives PDE23 back to what DAPM last
+    asked for (stock code always ended in PS3). Note: with `0xc081` bit 2 clear (idle in PS3, fresh amp) `0xf01e`
+    and DSP RAM read back `0xdeadbeef`; that alone is not a broken DSP.
 - `amp-power-cycle.sh` (rescue, normally not needed) power-cycles both amps through their LDO enables, as ACPI
   `CNT0._PS3`/`_PS0` do on Windows (GPIO 74 = amp 1, GPIO 47 = amp 2); Linux never calls those. Use it when the
   speakers crackle or drop out after a bus error: a module reload alone leaves the amps in that state. Module

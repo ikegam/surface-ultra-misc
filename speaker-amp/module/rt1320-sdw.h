@@ -208,6 +208,8 @@ struct rt1320_sdw_priv {
 	struct work_struct load_dspfw_work;
 	struct delayed_work auto_dspfw_work;
 	int auto_dspfw_tries;
+	bool pde23_on;		/* DAPM last asked PDE23 for PS0 */
+	bool keep_ps0;		/* DSP load + RAE in progress: stay in PS0 */
 	struct sdw_bpt_msg bra_msg;
 };
 

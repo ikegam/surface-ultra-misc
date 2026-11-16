@@ -1170,6 +1170,50 @@ static int rt1320_pde_transition_delay(struct rt1320_sdw_priv *rt1320, unsigned 
 	return 0;
 }
 
+/*
+ * The DSP load/start path waits for PDE23 as long as the ACPI PDE delay table
+ * allows (8 s PS3<->PS0 max), as RtkSdcaXu does before it touches the DSP
+ * (it waits for REQ == ACTUAL up to 30 s). The DAPM events keep the short wait:
+ * RtkSdcaXu does not poll ACTUAL for the class driver's requests at all.
+ */
+#define RT1320_PDE23_MAX_MS 8000
+
+static int rt1320_pde23_wait(struct rt1320_sdw_priv *rt1320, unsigned int ps)
+{
+	struct device *dev = &rt1320->sdw_slave->dev;
+	unsigned long start = jiffies, timeout = start + msecs_to_jiffies(RT1320_PDE23_MAX_MS);
+	unsigned int val = 0xff;
+
+	for (;;) {
+		regmap_read(rt1320->regmap,
+			SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23, RT1320_SDCA_CTL_ACTUAL_POWER_STATE, 0), &val);
+		if (val == ps)
+			break;
+		if (time_after(jiffies, timeout)) {
+			dev_warn(dev, "PDE23 still %#x, not PS%u, after %u ms\n", val, ps, RT1320_PDE23_MAX_MS);
+			return -ETIMEDOUT;
+		}
+		usleep_range(1000, 1500);
+	}
+	if (time_after(jiffies, start + msecs_to_jiffies(500)))
+		dev_info(dev, "PDE23 reached PS%u after %u ms\n", ps, jiffies_to_msecs(jiffies - start));
+	pm_runtime_mark_last_busy(dev);
+	return 0;
+}
+
+static int rt1320_pde23_set(struct rt1320_sdw_priv *rt1320, unsigned int ps)
+{
+	regmap_write(rt1320->regmap,
+		SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23, RT1320_SDCA_CTL_REQ_POWER_STATE, 0), ps);
+	return rt1320_pde23_wait(rt1320, ps);
+}
+
+/* end of a DSP load or RAE: give PDE23 back to what DAPM last asked for */
+static void rt1320_pde23_restore(struct rt1320_sdw_priv *rt1320)
+{
+	rt1320_pde23_set(rt1320, rt1320->pde23_on ? 0x00 : 0x03);
+}
+
 static void rt1320_data_rw(struct rt1320_sdw_priv *rt1320, unsigned int start,
 			   unsigned char *data, unsigned int size, enum rt1320_rw_type rw)
 {
@@ -1972,10 +2016,10 @@ static int rt1320_rae_load(struct rt1320_sdw_priv *rt1320)
 		return -EINVAL;
 	}
 
-	regmap_write(rt1320->regmap,
-			SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23,
-				RT1320_SDCA_CTL_REQ_POWER_STATE, 0), 0x00);
-	rt1320_pde_transition_delay(rt1320, FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23, 0x00);
+	if (rt1320_pde23_set(rt1320, 0x00)) {
+		ret = -ETIMEDOUT;
+		goto _exit_;
+	}
 
 	if (firmware_request_nowarn(&rae_fw, rae_amp_filename, dev))
 		request_firmware(&rae_fw, rae_filename, dev);
@@ -2112,10 +2156,7 @@ static int rt1320_rae_load(struct rt1320_sdw_priv *rt1320)
 	rt1320->rae_update_done = true;
 
 _exit_:
-	regmap_write(rt1320->regmap,
-			SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23,
-				RT1320_SDCA_CTL_REQ_POWER_STATE, 0), 0x03);
-	rt1320_pde_transition_delay(rt1320, FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23, 0x03);
+	rt1320_pde23_restore(rt1320);
 
 	return ret;
 }
@@ -2127,7 +2168,7 @@ static void rt1320_dsp_dump(struct rt1320_sdw_priv *rt1320, const char *when)
 		0xf01e, 0xc081, 0xc5c3, 0xc5c8, 0xe803, 0xe80b, 0xe83f,
 		0x3fc2bfc0, 0x3fc2bfc4, 0x3fc2bfc8, 0x3fc2bfc9, 0x3fc2bfca, 0x3fc2bfcb,
 		0x3fc2bf80, 0x3fc2ab80, 0x3fc2ab81, 0x3fc2ab82, 0x3fc2ab83,
-		RT1320_KR0_STATUS_CNT, RT1320_KR0_INT_READY,
+		RT1320_KR0_STATUS_CNT, RT1320_KR0_INT_READY, 0xd613, 0xd470,
 	};
 	struct device *dev = &rt1320->sdw_slave->dev;
 	unsigned int i, val;
@@ -2164,7 +2205,10 @@ static void rt1320_dsp_hold(struct rt1320_sdw_priv *rt1320)
 	unsigned int v = 0;
 	int i;
 
-	regmap_update_bits(rt1320->regmap, 0xd470, 0x80, 0x00);
+	/*
+	 * RtkSdcaXu clears 0xd470 bit 7 here only on other platforms (its
+	 * +0x554 path). On the Surface it stays as 0xd470=0xec left it.
+	 */
 	regmap_update_bits(rt1320->regmap, 0xc01a, 0x40, 0x40);
 	regmap_update_bits(rt1320->regmap, 0xc5fb, 0x02, 0x00);
 	for (i = 0; i < 100; i++) {
@@ -2230,6 +2274,42 @@ static void rt1320_dsp_full_reset(struct rt1320_sdw_priv *rt1320)
 	regmap_update_bits(rt1320->regmap, 0xd613, 0x02, 0x00);
 }
 
+/*
+ * RtkSdcaXu's stop (as in rt1320_dsp_bypass): audio back to the bypass path,
+ * tell the DSP, stall it. The DSP clock (0xc081) is left alone. The caller
+ * bypasses the regmap cache.
+ */
+static void rt1320_dsp_stop(struct rt1320_sdw_priv *rt1320)
+{
+	regmap_write(rt1320->regmap, 0xc5c3, 0xf2);
+	regmap_write(rt1320->regmap, 0xc5c8, 0x03);
+	regmap_write(rt1320->regmap, 0xd470, 0xc8);
+	regmap_write(rt1320->regmap, 0x3fc2bfc4, 0x03);
+	rt1320_dsp_stall(rt1320, true);
+	rt1320_dsp_release_holds(rt1320);
+}
+
+/*
+ * True if the DSP may run firmware this driver loaded since the amp last lost
+ * power: 0xd613 bit 1 ("FW loaded"; an LDO power cycle clears it) set and not
+ * stalled (0xf01e bit 0). With 0xc081 bit 2 clear (seen in PS3 and on a fresh
+ * amp) 0xf01e and DSP RAM read back the bytes of 0xdeadbeef, so the stall
+ * state is unknown then: assume it runs.
+ */
+static bool rt1320_dsp_running_fw(struct rt1320_sdw_priv *rt1320)
+{
+	unsigned int f01e = 0x01, d613 = 0, c081 = 0;
+
+	regmap_read(rt1320->regmap, 0xd613, &d613);
+	if (!(d613 & 0x02))
+		return false;
+	regmap_read(rt1320->regmap, 0xc081, &c081);
+	if (!(c081 & 0x04))
+		return true;
+	regmap_read(rt1320->regmap, 0xf01e, &f01e);
+	return !(f01e & 0x01);
+}
+
 static void rt1320_write_u32(struct rt1320_sdw_priv *rt1320, unsigned int addr, u32 v)
 {
 	int i;
@@ -2249,12 +2329,7 @@ static void rt1320_dsp_bypass(struct rt1320_sdw_priv *rt1320)
 		 * DSP may still run: switching it under a running DSP wedged the
 		 * amp's memory bus (reads returned 0xdeadbeef).
 		 */
-		regmap_write(rt1320->regmap, 0xc5c3, 0xf2);
-		regmap_write(rt1320->regmap, 0xc5c8, 0x03);
-		regmap_write(rt1320->regmap, 0xd470, 0xc8);
-		regmap_write(rt1320->regmap, 0x3fc2bfc4, 0x03);
-		rt1320_dsp_stall(rt1320, true);
-		rt1320_dsp_release_holds(rt1320);
+		rt1320_dsp_stop(rt1320);
 		regcache_cache_bypass(rt1320->regmap, false);
 		rt1320->fw_load_done = false;
 		return;
@@ -2330,10 +2405,19 @@ struct rt1320_dspfwheader {
 	}
 
 	snd_soc_dapm_mutex_lock(dapm);
-	regmap_write(rt1320->regmap,
-			SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23,
-				RT1320_SDCA_CTL_REQ_POWER_STATE, 0), 0x00);
-	rt1320_pde_transition_delay(rt1320, FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23, 0x00);
+	if (rt1320->dev_id == RT1320_DEV_ID && win_start) {
+		unsigned int req = 0x03;
+
+		/* as RtkSdcaXu: let a pending PDE23 transition finish first */
+		regmap_read(rt1320->regmap, SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23,
+			    RT1320_SDCA_CTL_REQ_POWER_STATE, 0), &req);
+		rt1320_pde23_wait(rt1320, req);
+	}
+	if (rt1320_pde23_set(rt1320, 0x00)) {
+		dev_warn(dev, "%s: amp function not in PS0, DSP FW load skipped\n", __func__);
+		rt1320->fw_load_done = false;
+		goto _exit_;
+	}
 
 	if (rt1320_dspfw_status(rt1320)) {
 		unsigned int busy = 0;
@@ -2353,10 +2437,21 @@ struct rt1320_dspfwheader {
 	if (rt1320->dev_id == RT1320_DEV_ID) {
 		rt1320_dsp_dump(rt1320, "before download");
 		if (win_start) {
-			/* as RtkSdcaXu: hold, then a full reset that stalls the DSP first */
+			unsigned int d613 = 0;
+
+			/*
+			 * as RtkSdcaXu: hold, then stall. It does the full reset
+			 * only when the FW in amp RAM can't be trusted; a fresh
+			 * amp (0xd613 still 0 since power-on) runs ROM code only.
+			 */
 			regcache_cache_bypass(rt1320->regmap, true);
+			regmap_read(rt1320->regmap, 0xd613, &d613);
 			rt1320_dsp_hold(rt1320);
-			rt1320_dsp_full_reset(rt1320);
+			if (d613)
+				rt1320_dsp_full_reset(rt1320);
+			else
+				rt1320_dsp_stall(rt1320, true);
+			dev_dbg(dev, "dsp: 0xd613=%#x, %s\n", d613, d613 ? "full reset" : "fresh amp, no reset");
 			regcache_cache_bypass(rt1320->regmap, false);
 			rt1320->fw_load_done = false;
 		} else {
@@ -2610,10 +2705,9 @@ struct rt1320_dspfwheader {
 	pm_runtime_mark_last_busy(dev);
 
 _exit_:
-	regmap_write(rt1320->regmap,
-			SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23,
-				RT1320_SDCA_CTL_REQ_POWER_STATE, 0), 0x03);
-	rt1320_pde_transition_delay(rt1320, FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23, 0x03);
+	/* the RAE load that follows a good start runs in PS0 too */
+	if (!(rt1320->keep_ps0 && rt1320->fw_load_done))
+		rt1320_pde23_restore(rt1320);
 
 	snd_soc_dapm_mutex_unlock(dapm);
 }
@@ -2639,9 +2733,10 @@ static void rt1320_load_dspfw_work(struct work_struct *work)
 
 		ctl = rt1320_controls_lock(rt1320);
 		mutex_lock(&rt1320_dspfw_mutex);
-		rt1320_dspfw_load_code(rt1320);
-
 		/* the tuning lives in amp RAM too: restore it with the DSP FW */
+		rt1320->keep_ps0 = auto_dspfw;
+		rt1320_dspfw_load_code(rt1320);
+		rt1320->keep_ps0 = false;
 		if (auto_dspfw && rt1320->fw_load_done)
 			rt1320_rae_load(rt1320);
 		mutex_unlock(&rt1320_dspfw_mutex);
@@ -2687,7 +2782,9 @@ static void rt1320_auto_dspfw_work(struct work_struct *work)
 		/* same order as a control put: controls_rwsem, then rt1320_dspfw_mutex */
 		ctl = rt1320_controls_lock(rt1320);
 		mutex_lock(&rt1320_dspfw_mutex);
+		rt1320->keep_ps0 = true;
 		rt1320_dspfw_load_code(rt1320);
+		rt1320->keep_ps0 = false;
 		if (rt1320->fw_load_done)
 			rt1320_rae_load(rt1320);
 		mutex_unlock(&rt1320_dspfw_mutex);
@@ -2863,6 +2960,25 @@ static int rt1320_io_init(struct device *dev, struct sdw_slave *slave)
 
 	/* initialization write */
 	if ((amp_func_status & FUNCTION_NEEDS_INITIALIZATION) || !rt1320->first_hw_init) {
+		if (rt1320->dev_id == RT1320_DEV_ID && win_start) {
+			/*
+			 * The preset rewrites the DSP clock (0xc081) and the DSP
+			 * mailbox. Done under firmware that still runs (the amps
+			 * keep power over a module reload or a reboot), that left
+			 * the amp's memory bus reading 0xdeadbeef. RtkSdcaXu never
+			 * re-inits a live DSP; stall it first.
+			 */
+			rt1320_dsp_dump(rt1320, "at io_init");
+			if (!rt1320->first_hw_init)
+				regcache_cache_bypass(rt1320->regmap, true);
+			if (rt1320_dsp_running_fw(rt1320)) {
+				dev_info(dev, "dsp: FW still running at init, stalling it before the preset\n");
+				rt1320_dsp_stop(rt1320);
+				usleep_range(10000, 11000);
+			}
+			if (!rt1320->first_hw_init)
+				regcache_cache_bypass(rt1320->regmap, false);
+		}
 		switch (rt1320->dev_id) {
 		case RT1320_DEV_ID:
 			if (rt1320->version_id < RT1320_VC)
@@ -2983,12 +3099,14 @@ static int rt1320_pde23_event(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_POST_PMU:
+		rt1320->pde23_on = true;
 		regmap_write(rt1320->regmap,
 			SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23,
 				RT1320_SDCA_CTL_REQ_POWER_STATE, 0), ps0);
 		rt1320_pde_transition_delay(rt1320, FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23, ps0);
 		break;
 	case SND_SOC_DAPM_PRE_PMD:
+		rt1320->pde23_on = false;
 		regmap_write(rt1320->regmap,
 			SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23,
 				RT1320_SDCA_CTL_REQ_POWER_STATE, 0), ps3);
@@ -4039,6 +4157,24 @@ static void rt1320_sdw_remove(struct sdw_slave *slave)
 
 	cancel_delayed_work_sync(&rt1320->auto_dspfw_work);
 	cancel_work_sync(&rt1320->load_dspfw_work);
+
+	/*
+	 * As RtkSdcaXu on surprise removal: stall the DSP, so that the next
+	 * probe (module reload, amp-power-cycle.sh) finds it stopped.
+	 */
+	if (rt1320->hw_init && rt1320->dev_id == RT1320_DEV_ID && win_start &&
+	    pm_runtime_resume_and_get(&slave->dev) >= 0) {
+		mutex_lock(&rt1320_dspfw_mutex);
+		regcache_cache_bypass(rt1320->regmap, true);
+		if (rt1320_dsp_running_fw(rt1320)) {
+			rt1320_dsp_stop(rt1320);
+			dev_info(&slave->dev, "dsp: stalled at remove\n");
+		}
+		regcache_cache_bypass(rt1320->regmap, false);
+		rt1320->fw_load_done = false;
+		mutex_unlock(&rt1320_dspfw_mutex);
+		pm_runtime_put_noidle(&slave->dev);
+	}
 	pm_runtime_disable(&slave->dev);
 }
 

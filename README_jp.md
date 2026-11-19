@@ -79,26 +79,39 @@ sudo ./uninstall.sh
 Linux の既定では何も制御されていません。ACPI の温度ゾーンにはトリップ点が 1 つも無く、CPU に負荷をかけ続けると SoC は
 64〜68 W を出し、Tj はファームウェア側の約 98 ℃ に張り付きます。Windows の熱ポリシー(MPTF)は、本体表面の温度
 (SAM センサー VTS1)を 45 ℃ に保つよう SoC の持続電力上限を下げます(標準モードで AC 55 W、バッテリー 42.5 W)。
-ここでは Linux にある手段で同じことをします。
+ここでは Linux にある手段で同じことをします。既定のプロファイルは Windows より多めに許し(80 W、表面 52 ℃)、
+`standard` プロファイルが Windows の値です。
 
-- **`n1x-thermald`**(systemd サービス、python3 の標準ライブラリのみ):2 秒ごとに SoC の平均電力を予算と比べ、全 CPU の
-  `scaling_max_freq` を 5 % 刻みで動かします(下限 40 %)。表面温度の PI 制御(VTS1 = `surface_thermal` の temp9、目標
-  45 ℃。VTS5 = temp12、目標 51 ℃)が予算を下げます。非常時は、二次の表面温度 55.5 ℃ 以上か電池(RTS5 = temp5)62 ℃
-  以上で CPU を最低周波数に固定し、57 ℃ / 64 ℃ で電源を切ります。値は Windows と同じです。SSAM のセンサーが無いときは
-  電力予算だけで動きます。
+- **`n1x-thermald`**(systemd サービス、python3 の標準ライブラリのみ):2 秒ごとに SoC の平均電力を予算と比べ、制限の
+  段を上り下りします。CPU を先に、GPU を最後に絞ります(この機械の主な用途はローカル LLM を GPU で動かすことなので)。
+  CPU の `scaling_max_freq` を各クラスタの最大の 100 / 80 / 60 / 40 %、続いて GPU の最大クロック(`nvidia-smi -lgc`)を
+  2400 / 2100 / 1800 / 1400 / 1000 MHz にします。GPU は常に 2400 MHz に制限します。LLM のデコードで測ると速度は落ちず、
+  2515 MHz のブーストより約 15 W 減ります(1800 MHz でデコード -5 %・-6 W、1400 MHz で -11 %・-10 W)。表面温度の PI 制御
+  (VTS1 = `surface_thermal` の temp9、二次 = temp12)が予算を下げます。
+- **プロファイル**(`/etc/n1x-thermald.conf`、変更はすぐ反映。`sudo n1x-thermald --profile 名前` で書き換え):
+
+  | プロファイル | 予算 AC / バッテリー | 表面 | 二次 | HOT | サスペンド | 電源断 |
+  |---|---|---|---|---|---|---|
+  | `performance`(既定) | 80 / 80 W | 52 ℃ | 58 ℃ | 61 ℃ | 63 ℃ | 65 ℃ |
+  | `standard`(Windows の「推奨」) | 55 / 42.5 W | 45 ℃ | 51 ℃ | 55.5 ℃ | 57 ℃ | 59 ℃ |
+
+  HOT(二次の表面温度、または電池 RTS5 = temp5 が 62 ℃ 以上)では CPU を最低周波数、GPU を 1000 MHz に固定します。
+  「サスペンド」の温度が 3 回続くとサスペンド、電池 64 ℃ 以上か「電源断」の温度で電源を切ります。電池の値は Windows と
+  同じで、両プロファイル共通です。SSAM のセンサーが無いときは電力予算だけで動きます。
 - **Tj の安全網**:SoC の Tj を見る追加の ACPI 温度ゾーン `\_TZ.NXTJ`(`n1x-thermal.asl`)。100 ℃ で 20 個の CPU すべてを
   減速し、105 ℃ で電源を切ります。`n1x-thermal-ssdt.service` が起動時に `acpi_configfs` で読み込みます。
 
 ACPI の「温度ゾーン」のうち 2 つは温度ではありません。`\_TZ.PSOC`(thermal_zone2)と `\_TZ.PSYS`(thermal_zone1)は
 SoC とシステムの平均電力を mW で返すので、「2005 ℃」のような値に見えます。`n1x-thermald` は PSOC を電力の帰還に使います。
 
-19 スレッドの負荷での実測:SoC 電力 65 W → 52 W、Tj 98 ℃ → 94 ℃。負荷が終わると段階的に全速へ戻ります。
+19 スレッドの負荷での実測(Windows の値):SoC 電力 65 W → 52 W、Tj 98 ℃ → 94 ℃。負荷が終わると段階的に全速へ戻ります。
 
 ```
 cd thermal
 sudo ./install.sh          # 周波数の上限が実際に効くかの自己テスト付き
 ./n1x-thermald --dry-run   # 判断だけ表示(一般ユーザーで可)
 cat /run/n1x-thermald/status.json
+sudo n1x-thermald --profile standard   # Windows の値。再起動は不要
 ```
 
 ファンは EC(または teo-casares さんのファン制御デーモン)に任せ、`n1x-thermald` は触りません。
@@ -223,6 +236,8 @@ Windows の PEP ドライバ `nvpep.sys`(2.27)は、読み込み時に PSCI を 
 - クラスタ(CPU 0-9、10-19)ごとに、最後に眠る CPU を判定します。パッケージ全体も同様です。
 - 実際に眠る処理は、カーネル自身の `psci_cpu_suspend_enter()` です。フラグも ACPI ドライバと同じです。
 - 普段の待機ではパッケージの電源断までを使います。DRIPS は s2idle のときだけ、最後の CPU が 0x020100F0 + LevelID 0x2000 で要求します。
+- 最後の CPU 争いに負けて DENIED が返った CPU は、起き直さずにそのままコアの電源断に入ります。
+- 画面がついている間は、ファームウェアがパッケージの要求の大半をクラスタの電源断に格下げします。30 秒でドライバ側の受理は 4,863 回、ファームウェアが数えた本当のパッケージ電源断(PGKLL)は 151 回、クラスタは約 10,500 回でした。デバイスが動いているためのファームウェアの判断で、ドライバの誤りではありません。
 
 **現状**
 
@@ -236,6 +251,7 @@ Windows の PEP ドライバ `nvpep.sys`(2.27)は、読み込み時に PSCI を 
 cd osi-idle
 sudo ./install.sh                         # DKMS。すぐ読み込み、起動時にも読み込む(/etc/modprobe.d に enable=1)
 cat /sys/module/n1x_osi_idle/parameters/stats   # CPU_SUSPEND の結果: 電源断して復帰, すぐ復帰, DENIED, INVALID, その他
+grep . /sys/module/n1x_osi_idle/parameters/st_*  # 同じものを要求した状態ごとに(WFI, コア, クラスタ, パッケージ SL/LL, DRIPS)
 sudo ./drips-count                        # ファームウェアのカウンタ: DRIPS / パッケージ / クラスタの滞在時間(ns)と回数
 sudo ./uninstall.sh                       # 削除後に再起動すると ACPI アイドルドライバに戻る
 ```
@@ -379,14 +395,14 @@ speaker-amp のアンプ音量 85 でアナログ側で補う)、リミッタは
 弱めている。低音強調は Windows ではオフだが、外すとこの筐体の厚みが消える。
 
 **再生開始の遅れ。** しばらく無音だと PipeWire がスピーカーを閉じ、アンプも省電力に入る。リンクと 2 台のアンプ、
-その DSP を起こすのに約 2 秒かかるので、最初の音が遅れる。`./no-suspend.sh on` はスピーカーを開いたままにする
-(WirePlumber のルール `wireplumber/51-speaker-no-suspend.conf`)。すぐ鳴る代わりに、アイドル時の消費電力が少し
-増える。`./no-suspend.sh off` で戻る。システムの復帰後は最初の再生までスピーカーが閉じたままなので、その 1 回は
-遅いが、復帰時のアンプ DSP 読み直しとぶつかることはない。
+その DSP を起こすのに約 2 秒かかるので、最初の音が遅れる。ここではこれが既定のままで良い。speaker-amp が再生開始の
+たびに両方の DSP を確認するし、閉じればアイドル時に約 0.8 W 減る。遅れが気になるなら `./no-suspend.sh on` で
+スピーカーを開いたままにできる(WirePlumber のルール `wireplumber/51-speaker-no-suspend.conf`)。`./no-suspend.sh off`
+で戻る。
 
 ## gpu-power: NVIDIA の電力管理のメモ
 
-一部の N1X ノートは AC 接続時に GPU が約 750 MHz に張り付くのに、この機械では張り付かない理由を調べたときのメモです。ドライバは 620.70.06(オープンなカーネルモジュール)、linux-omarchy 7.3 です。機械を動かすのにここの物は不要です。
+一部の N1X ノートは AC 接続時に GPU が約 750 MHz に張り付くのに、この機械では張り付かない理由を調べたときのメモです。測ったときのドライバは 620.70.06(オープンなカーネルモジュール)、linux-omarchy 7.3 です。620.70.06 では s2idle が壊れた(`nv_pmops_suspend` が `NV_ERR_NOT_SUPPORTED` を返した)ので、この機械は 615.78.08 に戻しています。`ratedtdp-probe` は 615 でも同じ値を読みます。機械を動かすのにここの物は不要です。
 
 - **SoC の上限はファームウェアがすでにかけています。** CPU と GPU の両方に全負荷をかけると、SoC の平均電力(ACPI `\_TZ.PSOC`)は 80.0 W で落ち着き、GPU が自分でクロックを下げます(2132 → 1976 MHz)。OS 側に残っている仕事は表面温度を抑えることで、それは `thermal/` がやっています。
 - **nvidia-powerd(Dynamic Boost)はこの機械では役に立ちません。** ファームは NVPCF の `_DSM` にリビジョン 0x300 でしか答えません。620 のデーモンは 3.x の設定を読みますが、ワーカーを作りません("No Worker Running!")。ワーカーの生成は 1.x/2.x の経路にしか無いためです。2.x のデータに見せると(`nvpcf-shim/`)QBoost は動きますが、反応するのはプラットフォームのファームからの NVPCF イベントだけです。GPU の上限の書き込み(非公開の制御 `0x2080e634`)は `NOT_SUPPORTED` で返り、CPU の上限は SBIOS の `_DSM` に送られます。

@@ -56,6 +56,17 @@ MODULE_PARM_DESC(osi, "Switch PSCI to OS-initiated mode (0: stay platform-coordi
 static int stats[5];
 module_param_array(stats, int, NULL, 0444);
 
+/* the same per requested state (WFI, core, cluster, pkg-SL, pkg-LL, DRIPS) */
+static int st_down[6], st_ret[6], st_denied[6], st_fallback[6];
+module_param_array(st_down, int, NULL, 0444);
+MODULE_PARM_DESC(st_down, "per state: powered down and resumed");
+module_param_array(st_ret, int, NULL, 0444);
+MODULE_PARM_DESC(st_ret, "per state: firmware returned at once (aborted, e.g. a wakeup was pending)");
+module_param_array(st_denied, int, NULL, 0444);
+MODULE_PARM_DESC(st_denied, "per state: DENIED (lost the last-CPU race)");
+module_param_array(st_fallback, int, NULL, 0444);
+MODULE_PARM_DESC(st_fallback, "per state: after DENIED, CoreIdle-OFF entered instead");
+
 static bool pep = true;
 module_param(pep, bool, 0444);
 MODULE_PARM_DESC(pep, "In OSI mode also do nvpep.sys' ELST(1) and SYSRAM writes");
@@ -156,9 +167,19 @@ static int pick(int cpu, int index)
 }
 
 /* CPU_SUSPEND with the state as-is (original format: StateType bit16 = power-down) */
+static DEFINE_PER_CPU(int, cur_req);
+
 static int fw_enter(u32 state)
 {
 	int r = psci_enter(state);
+	int q = this_cpu_read(cur_req);
+
+	if (r == 0)
+		WRITE_ONCE(st_down[q], st_down[q] + 1);
+	else if (r == -EOPNOTSUPP)
+		WRITE_ONCE(st_ret[q], st_ret[q] + 1);
+	else if (r == -EPERM)
+		WRITE_ONCE(st_denied[q], st_denied[q] + 1);
 
 	switch (r) {
 	case 0:		WRITE_ONCE(stats[0], stats[0] + 1); break;
@@ -187,7 +208,18 @@ static int __osi_enter(struct cpuidle_device *dev, int index, bool s2idle)
 	 * Same pairing as the ACPI LPI driver: the states carry CPUIDLE_FLAG_RCU_IDLE and the
 	 * _RCU macro leaves ct_cpuidle_enter/exit to psci_cpu_suspend_enter()/cpu_suspend().
 	 */
+	this_cpu_write(cur_req, req);
 	ret = CPU_PM_CPU_IDLE_ENTER_PARAM_RCU(fw_enter, req, (u32)lpi[req].address);
+	if (ret < 0 && req > S_CORE) {
+		/*
+		 * DENIED: another CPU of the domain was not down yet when we asked. Stay idle
+		 * with CoreIdle-OFF instead of waking up and going round the idle loop again.
+		 */
+		WRITE_ONCE(st_fallback[req], st_fallback[req] + 1);
+		req = S_CORE;
+		this_cpu_write(cur_req, S_CORE);
+		ret = CPU_PM_CPU_IDLE_ENTER_PARAM_RCU(fw_enter, S_CORE, (u32)lpi[S_CORE].address);
+	}
 
 	raw_spin_lock(&dom_lock);
 	cpumask_clear_cpu(cpu, &idle_mask);

@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Keep the built-in speakers open while idle so playback starts at once.
+# Optional (off by default): keep the built-in speakers open while idle so playback starts at once.
 #   ./no-suspend.sh on | off
 # Waking the SoundWire link and both RT1320 amps (and their DSP) after PipeWire closed the
-# idle speakers took ~2 s. Costs some idle power. After a system resume the speakers stay
-# closed until the first playback, which keeps that one start slow but never overlaps the
-# amp DSP reload that runs on resume.
+# idle speakers takes ~2 s. Costs ~0.8 W at idle. Not needed with speaker-amp's playback-start
+# DSP check.
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./common.sh

@@ -17,7 +17,7 @@ Start there; the pieces below assume that setup.
 | Directory | What | Relation to teo-casares' work |
 |---|---|---|
 | [`als/`](#als-ambient-light-sensor) | ambient light sensor driver | independent |
-| [`thermal/`](#thermal-power-and-skin-temperature-control) | SoC power / skin temperature control, Tj safety net | independent; complements their fan daemon, and reads the SSAM temperature sensors registered by `ssam-helper` |
+| [`thermal/`](#thermal-power-and-skin-temperature-control) | SoC power / skin temperature control (CPU and GPU limits, two profiles), Tj safety net | independent; complements their fan daemon, and reads the SSAM temperature sensors registered by `ssam-helper` |
 | [`ssam-helper/`](#ssam-helper-stock-ssam-without-patched-modules) | stock SSAM + helper modules | **their approach** (described in the discussion), implemented independently |
 | [`backlight/`](#backlight-automatic-brightness) | automatic brightness | **a patch to their `n1x-edp-backlight`** (the script is not copied here) |
 | [`power-button/`](#power-button) | power button driver | independent driver; the cause of the phantom "Volume Down" (floating `MSHW0040` pins) was found by them |

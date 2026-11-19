@@ -42,5 +42,5 @@ floor.
 - The full arbitration state (`NV2080_CTRL_PERF_RATED_TDP_STATUS_PARAMS`, including `rm.clientActiveMask`) is not
   readable from user space on this setup; only the per-client requests are.
 - Run it once at idle and once while the GPU is under load, if the clock floor only appears under load.
-- Tested with the open kernel modules 620.70.06 on aarch64. The control has existed for years, so other versions
+- Tested with the open kernel modules 620.70.06 and 615.78.08 on aarch64. The control has existed for years, so other versions
   likely work too.

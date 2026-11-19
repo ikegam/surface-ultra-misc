@@ -17,7 +17,7 @@ teo-casares さんによる、この機種で Omarchy を動かす取り組み�
 | ディレクトリ | 内容 | teo-casares さんの成果との関係 |
 |---|---|---|
 | `als/` | 照度センサーのドライバ | 独立 |
-| `thermal/` | SoC 電力・表面温度の制御、Tj の安全網 | 独立。teo さんのファン制御デーモンを補うもので、`ssam-helper` が登録する SSAM 温度センサーを読む |
+| `thermal/` | SoC 電力・表面温度の制御(CPU と GPU の制限、2 つのプロファイル)、Tj の安全網 | 独立。teo さんのファン制御デーモンを補うもので、`ssam-helper` が登録する SSAM 温度センサーを読む |
 | `ssam-helper/` | 標準 SSAM + 補助モジュール | **teo さんが discussion で示した方式**を独自に実装したもの |
 | `backlight/` | 自動輝度 | **teo さんの `n1x-edp-backlight` へのパッチ**(スクリプト本体はここには入れていない) |
 | `power-button/` | 電源ボタンのドライバ | 独立したドライバ。phantom の「音量下げ」(浮いた `MSHW0040` のピン)の原因は teo さんが見つけたもの |

@@ -3,7 +3,7 @@ Automatic brightness (and an s2idle-resume fix) for teo-casares' n1x-edp-backlig
 The script itself is not in this repository: it is teo-casares' work, published in
 https://gist.github.com/teo-casares/8b64949638e1952602a7f435bb34d5b8
 (see also https://github.com/omacom/omarchy/discussions/15885). This patch applies to the
-Gist version of 2026-10-28:
+Gist version of 2026-10-18 (its latest revision):
 
   curl -LO https://gist.githubusercontent.com/teo-casares/8b64949638e1952602a7f435bb34d5b8/raw/n1x-edp-backlight
   patch n1x-edp-backlight < n1x-edp-backlight-auto.patch
@@ -214,8 +214,3 @@ Changes:
                  try:
                      with open(STATE + ".tmp", "w") as f: f.write(str(target))
                      os.replace(STATE + ".tmp", STATE)
-@@ -165,4 +283,3 @@
- 
- if __name__ == "__main__":
-     sys.exit(main())
--

@@ -24,6 +24,7 @@ teo-casares さんによる、この機種で Omarchy を動かす取り組み�
 | `suspend/` | ふたを閉じたときの誤復帰の防止、復帰直後にキーが効かない問題 | ふた閉じのフックは **teo さんが discussion で示した方式**を独自に実装し、タッチパッドと電源ボタンを足したもの。NVIDIA の部分は独立 |
 | `sapd-lps0/` | サスペンド前後に Surface 固有の Modern Standby 通知を送る(試験中) | 独立 |
 | `osi-idle/` | Windows と同じ PSCI OS-initiated モードで CPU アイドルと s2idle を動かす(試験中) | 独立 |
+| `sleep-debug/` | サスペンドの診断:最後の PM 段階を UEFI 変数に残す、起動時のレポート、サスペンドごとのログ | 独立 |
 | `keyboard/` | Caps Lock の遅れ、キー再マップでの連打 | 独立 |
 | `audio-jack/` | ヘッドホンジャックの検出 | 独立(上流の Realtek ドライバ) |
 | `speaker-amp/` | スピーカー: Windows のアンプ DSP ファームとチューニングで鳴らす | 独立。teo さんの音声環境(UCM プロファイル、`n1x-sdw-settle`)と組み合わせて動く |
@@ -261,6 +262,37 @@ sudo ./uninstall.sh                       # 削除後に再起動すると ACPI 
 - `max_depth`: 普段の待機で使う一番深い状態。既定値は 4 です。1 = コア、2 = クラスタ、3/4 = パッケージ、5 = DRIPS(マシンが固まります)。
 - `osi=0`: PC モードのまま動かします。ドライバ単体の試験用です。
 - `pep=0`: `ELST` と SYSRAM への書き込みを行いません。
+
+## sleep-debug: サスペンドの診断
+
+s2idle でのリセット(`sapd-lps0` 参照)を調べるための道具です。ジャーナルは `Performing sleep operation` で途切れ、
+pstore にも何も残りません。そこから先は RAM の中にしか無く、電源と一緒に消えるためです。機械を動かすのには不要です。
+
+- **`n1x_sleep_trace`**(DKMS モジュール):`suspend_resume` トレースポイントにつなぎ、到達した PM の段階(サスペンド
+  開始、`dpm_suspend*`、`machine_suspend`、DRIPS の出入り、`dpm_resume_noirq`、`dpm_complete`)を不揮発の UEFI 変数
+  `N1XSleepTrace-e592f01a-...` に書きます。ブロックしないランタイムサービスの経路を使い、1 回のサスペンドで 10 回ほどの
+  小さな書き込みです。リセットしても、最後に届いた段階が変数に残ります。
+- **`n1x-sleep-collect`**(`n1x-sleep-collect.service`、起動ごとに 1 回):その変数を読み、前回の起動がどう終わったか
+  (サスペンド中、正常終了、突然)、ファームの BERT 記録、起動時の RTC の時刻(電源が落ちたおおよその時刻)を調べ、SPM の
+  SRAM 2 ページを保存します。起動ごとに 1 ブロックを `/var/log/n1x-sleep-trace.log` に、生データを
+  `/var/lib/n1x-sleep-trace/<boot-id>/` に置きます。
+- **`n1x-sleep-log`**(systemd-sleep フック):サスペンドの直前に機械の状態(蓋、電池、温度制御、GPU と使用中のアプリ、
+  メモリ、カメラ、有効な wakeup 元、サスペンド統計、上位プロセス)を `/var/log/n1x-sleep.log` に書いて sync します。
+  復帰後は s2idle の起床回数、増えた IRQ、ハードウェアが眠っていた時間を書きます。バッテリー時は、寝ている間の平均電力も
+  `n1x-sleep-trace.log` に残します。
+
+```
+=== boot 8702c3ec collected 2026-11-19 23:13:37
+previous boot ended abruptly (not in suspend)
+trace var: suspend #1 started 2026-11-19 14:13:12, last phase dpm_complete:done [completed] (13 writes, DRIPS in/out 2/2, mono 1066.3s)
+BERT: none
+```
+
+```
+cd sleep-debug
+sudo ./install.sh      # DKMS、すぐ読み込む。collector は次の起動から動く
+sudo ./uninstall.sh    # UEFI 変数も消す
+```
 
 ## keyboard: Caps Lock の遅れ
 

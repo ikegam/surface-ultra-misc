@@ -1,0 +1,134 @@
+#!/usr/bin/python3 -I
+# n1x-sleep-collect: run once at boot (n1x-sleep-collect.service). Reports how the previous boot
+# ended and, if it died in a suspend, how far that suspend got. Stdlib only, runs as root.
+#
+# Sources:
+#   - UEFI variable N1XSleepTrace (written by the n1x_sleep_trace module at each suspend phase)
+#   - journal of the previous boot (did it end at "Performing sleep operation"?)
+#   - BERT record in this boot's kernel log (firmware "previous boot had an error"; cause word)
+#   - first journal timestamp of this boot, taken from the RTC before NTP: the RTC seems not to
+#     tick while the machine is off, so it roughly marks when the power went
+#   - SPM SYSRAM pages 0x12F000 and 0x130000 (firmware sleep telemetry), saved raw for diffing
+# Output: one summary block appended to /var/log/n1x-sleep-trace.log (and printed to the journal),
+#         raw files in /var/lib/n1x-sleep-trace/<boot-id>/.
+import datetime, json, mmap, os, re, struct, subprocess
+
+VAR = '/sys/firmware/efi/efivars/N1XSleepTrace-e592f01a-04b3-4563-8c48-1035716f772f'
+LOG = '/var/log/n1x-sleep-trace.log'
+OUT = '/var/lib/n1x-sleep-trace'
+SRAM_PAGES = (0x12F000, 0x130000)
+
+def sh(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout
+
+def iso(ts):
+    return datetime.datetime.fromtimestamp(ts).strftime('%F %T') if ts else '-'
+
+def read_var():
+    try:
+        raw = open(VAR, 'rb').read()[4:]          # efivarfs: 4-byte attributes first
+    except OSError:
+        return None
+    if len(raw) < 64:
+        return {'error': f'short record ({len(raw)} bytes)'}
+    magic, ver, seq, writes, started, mono_ms, start = struct.unpack_from('<IIIIQQB', raw)
+    stage = raw[40:64].split(b'\0')[0].decode(errors='replace')
+    freezes, thaws = struct.unpack_from('<HH', raw, 34) if ver >= 3 else (None, None)
+    if magic != 0x5331584e:
+        return {'error': f'bad magic {magic:#x}'}
+    return {'seq': seq, 'writes': writes, 'version': ver, 'drips_in': freezes, 'drips_out': thaws, 'started': iso(started), 'mono_s': mono_ms / 1000,
+            'stage': f'{stage}:{"start" if start else "done"}',
+            'verdict': 'completed' if (stage == 'dpm_complete' and not start) else
+                       f'stopped at {stage}:{"start" if start else "done"}'}
+
+def prev_boot():
+    lines = sh('journalctl', '-b', '-1', '-o', 'short-iso', '-q', '--no-pager').splitlines()
+    if not lines:
+        return {'ended': 'no journal'}
+    sleeps = [l for l in lines if 'Performing sleep operation' in l or 'returned from sleep' in l]
+    last = lines[-1]
+    clean = any(k in l for l in lines[-300:] for k in ('Reached target System Power Off',
+                'Reached target System Reboot', 'Journal stopped', 'systemd-shutdown',
+                'Stopping Flush Journal to Persistent Storage', 'Stopped target Local File Systems',
+                'System is rebooting', 'System is powering down'))
+    in_sleep = bool(sleeps) and 'Performing sleep operation' in sleeps[-1] and not clean
+    return {'ended': 'in suspend' if in_sleep else ('clean shutdown' if clean else 'abruptly (not in suspend)'),
+            'last_line': last[:160],
+            'suspend_started': sleeps[-1][:25] if in_sleep else None}
+
+def bert(boot='0'):
+    k = sh('journalctl', '-b', boot, '-k', '-o', 'cat', '-q', '--no-pager')
+    if 'BERT: Error records from previous boot' not in k:
+        return None
+    data = b''
+    for m in re.finditer(r'\[Hardware Error\]:\s+000000[0-9a-f]{2}: (.*)', k):
+        for w in m.group(1).split('  ')[0].split():
+            b = bytes.fromhex(w)
+            data += b[::-1] if len(w) == 8 else b    # dword columns are little-endian dumps
+    sec = re.search(r'section type: (?:unknown, )?(\S+)', k)
+    info = {'section': sec.group(1) if sec else '?', 'bytes': data.hex()}
+    if len(data) >= 0x32:
+        info['cause'] = f'{struct.unpack_from("<I", data, 0x2e)[0]:#010x}'
+    return info
+
+def first_entry(boot='0'):
+    p = subprocess.Popen(['journalctl', '-b', boot, '-o', 'json', '-q', '--no-pager'],
+                         stdout=subprocess.PIPE, text=True)
+    line = p.stdout.readline()
+    p.kill(); p.wait()
+    return json.loads(line) if line else None
+
+def rtc_vs_ntp():
+    f = first_entry()
+    if not f:
+        return None
+    rt = int(f['__REALTIME_TIMESTAMP']) / 1e6
+    mono = int(f['__MONOTONIC_TIMESTAMP']) / 1e6
+    sync = sh('journalctl', '-b', '0', '-u', 'systemd-timesyncd', '-o', 'json', '-q', '--no-pager',
+              '--grep', 'Initial clock synchronization').splitlines()
+    res = {'rtc_at_boot': iso(rt - mono)}
+    if sync:
+        s = json.loads(sync[0])
+        res['real_boot'] = iso(int(s['__REALTIME_TIMESTAMP']) / 1e6 - int(s['__MONOTONIC_TIMESTAMP']) / 1e6)
+    return res
+
+def dump_sram(d):
+    saved = []
+    try:
+        fd = os.open('/dev/mem', os.O_RDONLY | os.O_SYNC)
+    except OSError as e:
+        return f'no /dev/mem: {e}'
+    for base in SRAM_PAGES:
+        try:
+            m = mmap.mmap(fd, 4096, mmap.MAP_SHARED, mmap.PROT_READ, offset=base)
+            open(f'{d}/sram-{base:06x}.bin', 'wb').write(m[:4096])
+            m.close()
+            saved.append(f'{base:#x}')
+        except OSError as e:
+            saved.append(f'{base:#x}: {e}')
+    os.close(fd)
+    return ' '.join(saved)
+
+def main():
+    boot = open('/proc/sys/kernel/random/boot_id').read().strip().replace('-', '')
+    d = f'{OUT}/{boot}'
+    os.makedirs(d, exist_ok=True)
+    rep = {'boot': boot, 'collected': iso(datetime.datetime.now().timestamp()),
+           'previous_boot': prev_boot(), 'trace_var': read_var(), 'bert': bert(),
+           'clock': rtc_vs_ntp(), 'sram': dump_sram(d)}
+    json.dump(rep, open(f'{d}/report.json', 'w'), indent=1)
+    pb, tv = rep['previous_boot'], rep['trace_var'] or {}
+    lines = [f'=== boot {boot[:8]} collected {rep["collected"]}',
+             f'previous boot ended {pb["ended"]}' + (f' (suspend at {pb["suspend_started"]})' if pb.get('suspend_started') else ''),
+             f'  last line: {pb.get("last_line", "-")}',
+             f'trace var: ' + (f'suspend #{tv["seq"]} started {tv["started"]}, last phase {tv["stage"]} [{tv["verdict"]}] '
+                               f'({tv["writes"]} writes, DRIPS in/out {tv["drips_in"]}/{tv["drips_out"]}, mono {tv["mono_s"]:.1f}s)' if 'seq' in tv else str(rep['trace_var'])),
+             f'BERT: ' + (f'cause {rep["bert"].get("cause", "?")} section {rep["bert"]["section"]}' if rep['bert'] else 'none'),
+             f'clock: {rep["clock"]}', f'sram: {rep["sram"]}']
+    if pb['ended'] == 'in suspend':
+        lines.insert(1, '!!! PREVIOUS BOOT DIED IN SUSPEND')
+    text = '\n'.join(lines) + '\n'
+    open(LOG, 'a').write(text)
+    print(text, end='')
+
+main()

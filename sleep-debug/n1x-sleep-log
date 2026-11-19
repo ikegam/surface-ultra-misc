@@ -1,0 +1,71 @@
+#!/bin/bash
+# Surface Laptop Ultra: record the machine state right before each suspend and a
+# line after each resume in /var/log/n1x-sleep.log, synced to disk before the
+# kernel suspends. A hang (2026-11-01..03, s2idle never returns, nothing in pstore)
+# then shows up as a "pre" block without a matching "post" line.
+# Installed by install.sh to /usr/lib/systemd/system-sleep/ (mode 755).
+
+log=/var/log/n1x-sleep.log
+stamp=/run/n1x-sleep-last-resume
+# Energy across each sleep: one line per suspend in the tracer's log, so the
+# average power while asleep (W) can be read after any real lid-close.
+# BAT1 energy_now updates only every few minutes: short sleeps show 0.
+elog=/var/log/n1x-sleep-trace.log
+estamp=/run/n1x-sleep-energy
+bat=/sys/class/power_supply/BAT1
+
+now() { date '+%F %T'; }
+up() { awk '{printf "%.2fh", $1/3600}' /proc/uptime; }
+
+case "$1" in
+pre)
+	{
+		echo "=== pre $2 $(now) uptime=$(up) since_last_resume=$( [ -f $stamp ] && echo $(( $(date +%s) - $(cat $stamp) ))s || echo none)"
+		echo "lid: $(cat /proc/acpi/button/lid/*/state 2>/dev/null | awk '{print $2}')"
+		echo "power: bat=$(cat /sys/class/power_supply/BAT1/capacity 2>/dev/null)% $(cat /sys/class/power_supply/BAT1/status 2>/dev/null) ac=$(cat /sys/class/power_supply/ADP1/online 2>/dev/null)"
+		echo "thermal: $(cat /run/n1x-thermald/status.json 2>/dev/null)"
+		echo "gpu: $(timeout 3 nvidia-smi --query-gpu=temperature.gpu,power.draw,pstate --format=csv,noheader 2>&1)"
+		timeout 3 nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader 2>&1 |
+			cut -c1-120 | sed 's/^/gpu-app: /'
+		grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree|Shmem|Unevictable):' /proc/meminfo | tr -s ' ' | paste -sd' ' | sed 's/^/mem: /'
+		echo "nvrm-oom-this-boot: $(journalctl -k -b --no-pager -q 2>/dev/null | grep -c NV_ERR_NO_MEMORY)"
+		echo "camera: $(for d in /dev/video*; do fuser "$d" >/dev/null 2>&1 && printf '%s(open) ' "$d"; done) mods=$(lsmod | awk '/^(surface_ultra_cam|surface_ccu_boot|v4l2loopback) /{printf "%s:%s ", $1, $3}')"
+		echo "wakeup-enabled: $(for f in /sys/bus/*/devices/*/power/wakeup; do [ "$(cat "$f" 2>/dev/null)" = enabled ] && basename "$(dirname "$(dirname "$f")")"; done | paste -sd' ')"
+		echo "suspend_stats: success=$(cat /sys/power/suspend_stats/success) fail=$(cat /sys/power/suspend_stats/fail) last_failed=$(cat /sys/power/suspend_stats/last_failed_dev)/$(cat /sys/power/suspend_stats/last_failed_step) max_hw_sleep=$(cat /sys/power/suspend_stats/max_hw_sleep 2>/dev/null)"
+		echo "load: $(cat /proc/loadavg)"
+		ps -eo pcpu,rss,comm --sort=-pcpu --no-headers | head -5 | awk '{printf "%s%%/%dM/%s  ", $1, $2/1024, $3}' | sed 's/^/top: /'; echo
+	} >> "$log" 2>&1
+	sync -f "$log"
+	echo "$(date +%s) $(cat $bat/energy_now) $(cat /sys/class/power_supply/ADP1/online)" > "$estamp"
+	# IRQ counts, diffed in "post": names whatever kept waking the SoC during s2idle
+	# (2026-11-17: 3471 wake cycles at exactly 0.5 s in one 36-min sleep, source unknown).
+	cat /proc/interrupts > /run/n1x-sleep-irq-pre
+	;;
+post)
+	if read -r t0 e0 ac0 < "$estamp" 2>/dev/null; then
+		t1=$(date +%s) e1=$(cat $bat/energy_now) ac1=$(cat /sys/class/power_supply/ADP1/online)
+		lpi6=$(cat /sys/devices/system/cpu/cpu0/cpuidle/state6/disable 2>/dev/null)
+		dvfsrc=$(python3 -I -c 'import mmap,os,struct;f=os.open("/dev/mem",os.O_RDONLY|os.O_SYNC);m=mmap.mmap(f,4096,mmap.MAP_SHARED,mmap.PROT_READ,offset=0x12F000);print(struct.unpack_from("<I",m,0xC00)[0])' 2>/dev/null)
+		awk -v t0="$t0" -v t1="$t1" -v e0="$e0" -v e1="$e1" -v ac="$ac0$ac1" -v hw="$(cat /sys/power/suspend_stats/last_hw_sleep 2>/dev/null)" \
+		    -v lpi6="$lpi6" -v dv="$dvfsrc" -v now="$(now)" 'BEGIN {
+			dt = t1 - t0; de = (e0 - e1) / 1e6
+			w = (dt > 0 && ac == "00") ? sprintf("%.2f W", de * 3600 / dt) : (ac != "00" ? "n/a (AC)" : "n/a")
+			printf "energy %s: slept %dm%02ds (hw %.0fs), %.2f Wh used, avg %s  [lpi6_off=%s dvfsrc=%s]\n",
+			       now, dt / 60, dt % 60, hw / 1e6, de, w, lpi6, dv }' >> "$elog"
+	fi
+	date +%s > "$stamp"
+	# s2idle wake cycles (one "Timekeeping suspended" per cycle) and the IRQs that grew
+	cycles=$(journalctl -k -b --no-pager -q -o cat 2>/dev/null | awk '/suspend entry/{n=0} /Timekeeping suspended/{n++} END{print n+0}')
+	irqs=$( [ -f /run/n1x-sleep-irq-pre ] && awk '
+		function tot(   i, s) { s = 0; for (i = 2; i <= NF && $i ~ /^[0-9]+$/; i++) s += $i; return s }
+		function name(   i, n) { for (i = 2; i <= NF && $i ~ /^[0-9]+$/; i++); n = ""; for (; i <= NF; i++) n = n " " $i; return n }
+		FNR == 1 { next }
+		NR == FNR { pre[$1] = tot(); next }
+		{ d = tot() - pre[$1]; if (d > 0) printf "%d %s%s\n", d, $1, name() }' /run/n1x-sleep-irq-pre /proc/interrupts |
+		sort -rn | head -6 | tr -s ' ' | paste -sd'|')
+	echo "s2idle-cycles: $cycles  irq-delta: $irqs" >> "$log"
+	echo "--- post $2 $(now) uptime=$(up) wakeup_irq=$(journalctl -k -b --no-pager -q -n 200 2>/dev/null | grep -o 'wakeup from IRQ [0-9]*' | tail -1 | awk '{print $4}') hw_sleep=$(cat /sys/power/suspend_stats/last_hw_sleep 2>/dev/null)us" >> "$log"
+	sync -f "$log"
+	;;
+esac
+exit 0

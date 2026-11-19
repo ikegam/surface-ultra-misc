@@ -1,0 +1,10 @@
+[Unit]
+Description=N1X: report how the previous boot ended and how far its last suspend got
+After=local-fs.target systemd-journald.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/n1x-sleep-collect
+
+[Install]
+WantedBy=multi-user.target

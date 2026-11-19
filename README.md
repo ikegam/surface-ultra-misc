@@ -24,6 +24,7 @@ Start there; the pieces below assume that setup.
 | [`suspend/`](#suspend-sleep-and-resume) | no wakeups with the lid closed; keys dead right after resume | the lid hook is **their approach** (described in the discussion), implemented independently, with the touchpad and power button added; the NVIDIA part is independent |
 | [`sapd-lps0/`](#sapd-lps0-surface-modern-standby-notifications) | sends the Surface-specific Modern Standby notifications around suspend (experimental) | independent |
 | [`osi-idle/`](#osi-idle-os-initiated-cpu-idle-like-windows) | CPU idle and s2idle in PSCI OS-initiated mode, as Windows runs the SoC (experimental) | independent |
+| [`sleep-debug/`](#sleep-debug-suspend-diagnostics) | suspend diagnostics: last PM phase in a UEFI variable, boot-time report, per-suspend log | independent |
 | [`keyboard/`](#keyboard-caps-lock-lag) | Caps Lock lag; repeated keys through a key remapper | independent |
 | [`audio-jack/`](#audio-jack-headphone-detection) | headphone jack detection | independent (upstream Realtek driver) |
 | [`speaker-amp/`](#speaker-amp-windows-amp-dsp-firmware-and-tuning) | speakers: run the amps' DSP firmware and tuning from Windows | independent; works with their audio setup (UCM profile, `n1x-sdw-settle`) |
@@ -270,6 +271,37 @@ sudo ./uninstall.sh                       # reboot afterwards to get the ACPI id
 
 Module parameters: `max_depth` (runtime, default 4: 1 core, 2 cluster, 3/4 package; 5 = DRIPS hangs the machine),
 `osi=0` (keep PC mode, only for testing the driver), `pep=0` (skip `ELST` and the SYSRAM writes).
+
+## sleep-debug: suspend diagnostics
+
+For the s2idle resets (see `sapd-lps0`): the journal ends at `Performing sleep operation` and pstore stays empty,
+because everything after that is in RAM and lost with the power. Not needed to run the machine.
+
+- **`n1x_sleep_trace`** (DKMS module): hooks the `suspend_resume` tracepoint and writes the PM phase reached
+  (suspend entry, `dpm_suspend*`, `machine_suspend`, DRIPS entry/exit, `dpm_resume_noirq`, `dpm_complete`) into
+  the non-volatile UEFI variable `N1XSleepTrace-e592f01a-...` through the non-blocking runtime-service path, about
+  ten small writes per suspend. After a reset the variable still holds the last phase.
+- **`n1x-sleep-collect`** (`n1x-sleep-collect.service`, once per boot): reads that variable, checks how the
+  previous boot ended (in suspend, shut down, or abruptly), the firmware's BERT record, the RTC time at boot
+  (roughly when the power went) and saves two SPM SRAM pages. One block per boot goes to
+  `/var/log/n1x-sleep-trace.log`, raw data to `/var/lib/n1x-sleep-trace/<boot-id>/`.
+- **`n1x-sleep-log`** (systemd-sleep hook): before each suspend, writes the machine state (lid, battery, thermal,
+  GPU and its apps, memory, camera, enabled wakeup sources, suspend stats, top processes) to
+  `/var/log/n1x-sleep.log` and syncs it; after resume, the s2idle wake cycles, the IRQs that grew and the
+  hardware sleep time. On battery it also logs the average power while asleep to `n1x-sleep-trace.log`.
+
+```
+=== boot 8702c3ec collected 2026-11-19 23:13:37
+previous boot ended abruptly (not in suspend)
+trace var: suspend #1 started 2026-11-19 14:13:12, last phase dpm_complete:done [completed] (13 writes, DRIPS in/out 2/2, mono 1066.3s)
+BERT: none
+```
+
+```
+cd sleep-debug
+sudo ./install.sh      # DKMS, loads at once; the collector runs from the next boot
+sudo ./uninstall.sh    # also deletes the UEFI variable
+```
 
 ## keyboard: Caps Lock lag
 

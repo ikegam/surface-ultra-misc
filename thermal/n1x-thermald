@@ -10,7 +10,7 @@ The ladder throttles the CPU first and the GPU last, because the GPU running LLM
 this machine is for. The GPU is always capped at GPU_MAX (2400 MHz): measured with ds4,
 that costs no decode speed (23.0 t/s either way) and saves ~15 W against the default
 2515 MHz boost. Below that, 1800 MHz costs 5 % decode for -6 W, 1400 MHz 11 % for -10 W.
-See README.md ("thermal") for where the Windows numbers come from.
+See README.md in this directory for where the Windows numbers come from.
 
 Profiles (/etc/n1x-thermald.conf, `profile = performance` or `standard`, re-read live):
   performance  80 W, skin 52 C, secondary 58 C, HOT 61 C, suspend 63 C, off 65 C

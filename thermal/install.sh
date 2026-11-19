@@ -11,7 +11,8 @@ systemctl daemon-reload
 systemctl enable --now n1x-thermal-ssdt.service
 echo "== selftest (does scaling_max_freq take effect?)"
 /usr/local/bin/n1x-thermald --selftest
-systemctl enable --now n1x-thermald.service
+systemctl enable n1x-thermald.service
+systemctl restart n1x-thermald.service   # picks up a new daemon on reinstall
 sleep 3
 systemctl --no-pager --lines=5 status n1x-thermald || true
 cat /run/n1x-thermald/status.json 2>/dev/null; echo

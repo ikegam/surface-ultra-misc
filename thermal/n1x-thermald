@@ -1,15 +1,27 @@
 #!/usr/bin/python3
 """n1x-thermald: skin-temperature / SoC-power controller for the Surface Laptop Ultra (N1X).
 
-Windows keeps the skin (SAM sensor VTS1) at 45 C by lowering the SoC's sustained power
-limit (PL1: 55 W on AC, 42.5 W on battery). Linux has no PL1 knob here, so this daemon
-holds the averaged SoC power (ACPI \\_TZ.PSOC, which reports mW, not a temperature) under
-a budget by moving every CPU's scaling_max_freq, and lowers the budget when the skin gets
-warm. The numbers come from the Windows thermal policy (see README.md, "thermal").
+Windows keeps the skin (SAM sensor VTS1) at a target by lowering the SoC's sustained power
+limit (PL1). Linux has no PL1 knob here, so this daemon holds the averaged SoC power
+(ACPI \\_TZ.PSOC, which reports mW, not a temperature) under a budget by walking a ladder
+of limits, and lowers the budget when the skin gets warm.
 
-  n1x-thermald              run (root; systemd service)
-  n1x-thermald --dry-run    compute and print decisions every cycle, write nothing (any user)
-  n1x-thermald --selftest   check that scaling_max_freq really slows a CPU (root)
+The ladder throttles the CPU first and the GPU last, because the GPU running LLMs is what
+this machine is for. The GPU is always capped at GPU_MAX (2400 MHz): measured with ds4,
+that costs no decode speed (23.0 t/s either way) and saves ~15 W against the default
+2515 MHz boost. Below that, 1800 MHz costs 5 % decode for -6 W, 1400 MHz 11 % for -10 W.
+See README.md ("thermal") for where the Windows numbers come from.
+
+Profiles (/etc/n1x-thermald.conf, `profile = performance` or `standard`, re-read live):
+  performance  80 W, skin 52 C, secondary 58 C, HOT 61 C, suspend 63 C, off 65 C
+  standard     Windows "recommended": 55/42.5 W, skin 45 C, secondary 51 C, HOT 55.5,
+               suspend 57 C, off 59 C
+The battery limits (HOT 62 C, CRT 64 C) are the same in both: they protect the cell, not skin.
+
+  n1x-thermald                      run (root; systemd service)
+  n1x-thermald --dry-run            print decisions every cycle, write nothing (any user)
+  n1x-thermald --selftest           check that scaling_max_freq really slows a CPU (root)
+  n1x-thermald --profile NAME       write /etc/n1x-thermald.conf (root); the daemon follows
 
 System python3 and the standard library only: it runs as root at boot, where uv is not
 available.
@@ -23,21 +35,34 @@ import sys
 import time
 
 PERIOD = 2.0                    # s
-P_BUDGET_AC = 55.0              # W, Windows "recommended" PL1 on AC
-P_BUDGET_DC = 42.5              # W, on battery
+CONF = "/etc/n1x-thermald.conf"
+STATUS = "/run/n1x-thermald/status.json"
+
+PROFILES = {
+    # budget W (AC, DC); PI targets C; secondary-skin HOT / suspend / poweroff C
+    "performance": dict(ac=80.0, dc=80.0, skin=52.0, sec=58.0,
+                        sec_hot=61.0, sec_suspend=63.0, sec_off=65.0),
+    "standard": dict(ac=55.0, dc=42.5, skin=45.0, sec=51.0,
+                     sec_hot=55.5, sec_suspend=57.0, sec_off=59.0),
+}
+DEFAULT_PROFILE = "performance"
+
 P_MIN = 10.0                    # W, lowest budget the skin loop may ask for
-SKIN = dict(iid=9, target=45.0, kp=3.0, ki=0.03)        # VTS1, Windows SKIN_TARGET_REC
-SECONDARY = dict(iid=12, target=51.0, kp=3.0, ki=0.03)  # VTS5, Windows secondary PID target
-BATT_IID = 5                    # RTS5
-SEC_HOT, SEC_CRIT = 55.5, 57.0  # Windows SAFE_SKIN_HOT / CRT
-BATT_HOT, BATT_CRIT = 62.0, 64.0
-CAP_FLOOR = 0.40                # lowest normal cap (fraction of max frequency)
-CAP_STEP = 0.05
+KP, KI = 3.0, 0.03
+SKIN_IID, SEC_IID, BATT_IID = 9, 12, 5   # SAM TMP: VTS1, VTS4 (hwmon label I_VTS5), RTS5
+BATT_HOT, BATT_CRIT = 62.0, 64.0         # Windows SAFE_BATT_HOT / CRT
+HOT_RELEASE = 1.5                        # C below HOT before leaving HOT
+SUSPEND_HOLD = 3                         # consecutive samples at the suspend threshold
+
+GPU_MAX = 2400                  # MHz, always: no decode loss, -15 W
+GPU_HOT = 1000                  # MHz while HOT
+# (CPU cap as a fraction of max frequency, GPU max MHz), least to most throttled
+LADDER = [(1.0, GPU_MAX), (0.8, GPU_MAX), (0.6, GPU_MAX), (0.4, GPU_MAX),
+          (0.4, 2100), (0.4, 1800), (0.4, 1400), (0.4, 1000)]
 STEP_DOWN_HOLD = 8.0            # s between steps: PSOC is a ~28 s average, so wait for it
 STEP_UP_HOLD = 8.0
 OVER_MARGIN = 1.0               # W above budget before stepping down
 UNDER_MARGIN = 3.0              # W below budget before stepping up
-STATUS = "/run/n1x-thermald/status.json"
 
 
 def read(path):
@@ -104,6 +129,26 @@ def on_ac():
     return True
 
 
+class Config:
+    """`profile = NAME` in CONF; re-read when the file changes."""
+
+    def __init__(self):
+        self.mtime, self.profile = None, DEFAULT_PROFILE
+
+    def get(self):
+        try:
+            m = os.stat(CONF).st_mtime
+        except OSError:
+            m = None
+        if m != self.mtime:
+            self.mtime, self.profile = m, DEFAULT_PROFILE
+            for line in (read(CONF) or "").splitlines():
+                k, _, v = line.partition("=")
+                if k.strip() == "profile" and v.strip() in PROFILES:
+                    self.profile = v.strip()
+        return self.profile
+
+
 class Cpus:
     """The cap is a fraction of each policy's own maximum (the clusters differ)."""
 
@@ -131,35 +176,76 @@ class Cpus:
         self.set_cap(1.0)
 
 
+class Gpu:
+    """GPU max clock through `nvidia-smi -lgc` (the power limit is N/A on this GPU)."""
+
+    def __init__(self):
+        self.applied, self.failed = None, None
+
+    def _run(self, *args):
+        try:
+            r = subprocess.run(["nvidia-smi", *args], capture_output=True, text=True, timeout=10)
+            return r.returncode == 0, (r.stdout + r.stderr).strip()
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, str(e)
+
+    def set_max(self, mhz):
+        if mhz == self.applied:
+            return
+        ok, out = self._run("-lgc", f"0,{mhz}")
+        if ok:
+            self.applied, self.failed = mhz, None
+        elif mhz != self.failed:
+            # the driver may not be up yet at boot; retry every cycle, but say it once
+            print(f"cannot cap GPU at {mhz} MHz: {out}", flush=True)
+            self.failed = mhz
+
+    def power(self):
+        ok, out = self._run("--query-gpu=power.draw", "--format=csv,noheader,nounits")
+        try:
+            return float(out.splitlines()[0]) if ok else None
+        except (ValueError, IndexError):
+            return None
+
+    def restore(self):
+        self._run("-rgc")
+        self.applied = None
+
+
 class Pi:
     """Budget reduction from one skin sensor: kp * error + integral, never negative."""
 
-    def __init__(self, target, kp, ki, span):
-        self.target, self.kp, self.ki, self.span = target, kp, ki, span
+    def __init__(self, span):
+        self.span = span
         self.integral = 0.0
 
-    def cut(self, temp, dt):
+    def cut(self, temp, target, dt):
         if temp is None:
             return 0.0
-        err = temp - self.target
-        self.integral = min(max(self.integral + self.ki * err * dt, 0.0), self.span)
-        return max(self.kp * err, 0.0) + self.integral
+        err = temp - target
+        self.integral = min(max(self.integral + KI * err * dt, 0.0), self.span)
+        return max(KP * err, 0.0) + self.integral
+
+
+def fmt(t):
+    return "  -  " if t is None else f"{t:4.1f}"
 
 
 def main():
     dry = "--dry-run" in sys.argv
-    sensors, cpus = Sensors(), Cpus()
+    sensors, cpus, gpu, config = Sensors(), Cpus(), Gpu(), Config()
     if sensors.psoc is None:
         sys.exit("ACPI \\_TZ.PSOC not found")
-    span = P_BUDGET_AC - P_MIN
-    skin = Pi(SKIN["target"], SKIN["kp"], SKIN["ki"], span)
-    sec = Pi(SECONDARY["target"], SECONDARY["kp"], SECONDARY["ki"], span)
-    cap, last_step, hot = 1.0, 0.0, False
+    span = max(p["ac"] for p in PROFILES.values()) - P_MIN
+    skin, sec = Pi(span), Pi(span)
+    level, last_step, hot, suspend_count = 0, 0.0, False, 0
+    profile = None
 
     def stop(*_):
         if not dry:
             cpus.restore()
-        print("stopped, CPU limits restored", flush=True)
+            gpu.restore()
+        print("stopped, CPU and GPU limits restored", flush=True)
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, stop)
@@ -167,50 +253,76 @@ def main():
     if not dry:
         os.makedirs(os.path.dirname(STATUS), exist_ok=True)
         cpus.restore()
-    print(f"n1x-thermald: {cpus.describe()}, "
+    print(f"n1x-thermald: {cpus.describe()}, GPU max {GPU_MAX} MHz, "
           f"PSOC {sensors.psoc}, TSOC {sensors.tsoc}{' (dry run)' if dry else ''}", flush=True)
 
     prev = time.monotonic()
     while True:
         now = time.monotonic()
         dt, prev = now - prev, now
+        if dt > 10 * PERIOD:
+            # back from suspend: the averages are stale, start the PI over
+            skin.integral = sec.integral = 0.0
+            last_step = now
+        name = config.get()
+        if name != profile:
+            print(f"profile {name}: {PROFILES[name]}", flush=True)
+            profile = name
+        prof = PROFILES[name]
         sensors.rescan()
         ac = on_ac()
         power, tj = sensors.soc_power(), sensors.tj()
-        t_skin, t_sec, t_batt = sensors.sam(SKIN["iid"]), sensors.sam(SECONDARY["iid"]), sensors.sam(BATT_IID)
+        t_skin, t_sec, t_batt = sensors.sam(SKIN_IID), sensors.sam(SEC_IID), sensors.sam(BATT_IID)
+        ts, tb = t_sec or 0, t_batt or 0
 
-        base = P_BUDGET_AC if ac else P_BUDGET_DC
-        budget = max(P_MIN, base - max(skin.cut(t_skin, dt), sec.cut(t_sec, dt)))
+        base = prof["ac"] if ac else prof["dc"]
+        budget = max(P_MIN, base - max(skin.cut(t_skin, prof["skin"], dt),
+                                       sec.cut(t_sec, prof["sec"], dt)))
         reason = ""
 
-        if (t_sec or 0) >= SEC_CRIT or (t_batt or 0) >= BATT_CRIT:
+        # last resorts: power off at once, suspend after a few samples
+        if ts >= prof["sec_off"] or tb >= BATT_CRIT:
             print(f"CRITICAL: secondary skin {t_sec} C, battery {t_batt} C: powering off", flush=True)
             if not dry:
                 subprocess.run(["systemctl", "poweroff"])
-        was_hot = hot
-        hot = (t_sec or 0) >= SEC_HOT or (t_batt or 0) >= BATT_HOT or \
-            (was_hot and ((t_sec or 0) >= SEC_HOT - 1.5 or (t_batt or 0) >= BATT_HOT - 2))
-        if hot:
-            cap, reason = 0.0, "HOT"
-        elif was_hot:
-            cap, last_step, reason = CAP_FLOOR, now, "hot over"
-        elif power is not None:
-            over = power - budget
-            if over > OVER_MARGIN and cap > CAP_FLOOR and now - last_step >= STEP_DOWN_HOLD:
-                cap, last_step, reason = max(CAP_FLOOR, cap - CAP_STEP), now, "down"
-            elif over < -UNDER_MARGIN and cap < 1.0 and now - last_step >= STEP_UP_HOLD:
-                cap, last_step, reason = min(1.0, cap + CAP_STEP), now, "up"
+        suspend_count = suspend_count + 1 if ts >= prof["sec_suspend"] else 0
+        if suspend_count >= SUSPEND_HOLD:
+            print(f"CRITICAL: secondary skin {t_sec} C for {suspend_count} samples: suspending",
+                  flush=True)
+            suspend_count = 0
+            if not dry:
+                subprocess.run(["systemctl", "suspend"])
 
-        line = (f"{'AC' if ac else 'DC'} soc {power:5.1f} W / budget {budget:4.1f} W | "
-                f"skin {t_skin} sec {t_sec} batt {t_batt} tj {tj} | cap {cap:.2f} {reason}")
+        was_hot = hot
+        hot = ts >= prof["sec_hot"] or tb >= BATT_HOT or \
+            (was_hot and (ts >= prof["sec_hot"] - HOT_RELEASE or tb >= BATT_HOT - 2))
+        if hot:
+            cpu_cap, gpu_max, reason = 0.0, GPU_HOT, "HOT"
+        else:
+            if was_hot:
+                level, last_step, reason = len(LADDER) - 1, now, "hot over"
+            elif power is not None:
+                over = power - budget
+                if over > OVER_MARGIN and level < len(LADDER) - 1 and now - last_step >= STEP_DOWN_HOLD:
+                    level, last_step, reason = level + 1, now, "down"
+                elif over < -UNDER_MARGIN and level > 0 and now - last_step >= STEP_UP_HOLD:
+                    level, last_step, reason = level - 1, now, "up"
+            cpu_cap, gpu_max = LADDER[level]
+
         if dry or reason:
-            print(line, flush=True)
+            gw = gpu.power()
+            print(f"{name[:4]} {'AC' if ac else 'DC'} soc {power:5.1f} W "
+                  f"(gpu {'-' if gw is None else f'{gw:.0f}'} W) / budget {budget:4.1f} W | "
+                  f"skin {fmt(t_skin)} sec {fmt(t_sec)} batt {fmt(t_batt)} tj {fmt(tj)} | "
+                  f"L{level} cpu {cpu_cap:.2f} gpu {gpu_max} {reason}", flush=True)
         if not dry:
-            cpus.set_cap(cap)
+            cpus.set_cap(cpu_cap)
+            gpu.set_max(gpu_max)
             try:
                 with open(STATUS + ".tmp", "w") as f:
-                    json.dump(dict(ac=ac, soc_w=power, budget_w=budget, skin=t_skin, secondary=t_sec,
-                                   battery=t_batt, tj=tj, cap=round(cap, 2)), f)
+                    json.dump(dict(profile=name, ac=ac, soc_w=power, budget_w=budget, skin=t_skin,
+                                   secondary=t_sec, battery=t_batt, tj=tj, hot=hot, level=level,
+                                   cpu_cap=round(cpu_cap, 2), gpu_max_mhz=gpu_max), f)
                 os.replace(STATUS + ".tmp", STATUS)
             except OSError:
                 pass
@@ -218,7 +330,7 @@ def main():
 
 
 def selftest():
-    """Busy-loop speed on CPU 0 at 100 % and 50 % scaling_max_freq."""
+    """Busy-loop speed on CPU 0 at 100 % and 50 % scaling_max_freq; GPU cap set/reset."""
     cpus = Cpus()
     os.sched_setaffinity(0, {0})
 
@@ -238,7 +350,24 @@ def selftest():
         cpus.restore()
     print(f"loop rate at 100 %: {a:,.0f}/s, at 50 %: {b:,.0f}/s, ratio {b / a:.2f} "
           f"({'OK, the cap works' if b / a < 0.7 else 'the cap has NO effect'})")
+    gpu = Gpu()
+    ok, out = gpu._run("-lgc", f"0,{GPU_MAX}")
+    print(f"GPU clock cap: {'OK' if ok else 'FAILED: ' + out}")
+    gpu.restore()
+
+
+def set_profile(name):
+    if name not in PROFILES:
+        sys.exit(f"unknown profile {name!r}; choose from {', '.join(PROFILES)}")
+    write(CONF, f"# n1x-thermald: {' | '.join(PROFILES)}\nprofile = {name}\n")
+    print(f"profile = {name}: {PROFILES[name]}")
 
 
 if __name__ == "__main__":
-    selftest() if "--selftest" in sys.argv else main()
+    if "--selftest" in sys.argv:
+        selftest()
+    elif "--profile" in sys.argv:
+        i = sys.argv.index("--profile")
+        set_profile(sys.argv[i + 1] if i + 1 < len(sys.argv) else "")
+    else:
+        main()

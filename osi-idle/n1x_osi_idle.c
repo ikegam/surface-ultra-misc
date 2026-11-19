@@ -92,7 +92,8 @@ static int (*psci_enter)(u32 state);
 static struct cpuidle_device * __percpu *cpuidle_devices_p;
 static struct cpuidle_driver *acpi_drv;
 static struct cpuidle_device *acpi_dev[NR_CPUS];
-static struct cpuidle_device __percpu *acpi_devs;	/* processor_idle.c acpi_cpuidle_device */
+static struct cpuidle_device * __percpu *acpi_devs;	/* processor_idle.c acpi_cpuidle_device (per-CPU pointer) */
+static bool active;	/* our driver is registered */
 
 static DEFINE_RAW_SPINLOCK(dom_lock);
 static struct cpumask idle_mask;	/* CPUs in CoreIdle-OFF or deeper (or offline) */
@@ -313,39 +314,62 @@ static int __init osi_init(void)
 	for (cpu = 0; cpu < S_NUM; cpu++)
 		atomic_set(&composite[cpu], 0);
 
-	/* 1. take every CPU off the ACPI driver: they fall back to WFI (PSCI "running") */
-	for_each_possible_cpu(cpu) {
-		acpi_dev[cpu] = per_cpu_ptr(acpi_devs, cpu);
-		if (*per_cpu_ptr(cpuidle_devices_p, cpu) == acpi_dev[cpu])
-			cpuidle_unregister_device(acpi_dev[cpu]);
-	}
-	if (cpuidle_get_driver() == acpi_drv)
-		cpuidle_unregister_driver(acpi_drv);
-	else if (cpuidle_get_driver()) {
+	/* 0. check everything before touching anything: only the ACPI LPI driver, or nothing */
+	if (cpuidle_get_driver() && cpuidle_get_driver() != acpi_drv) {
 		pr_err("unexpected cpuidle driver %s\n", cpuidle_get_driver()->name);
 		return -EBUSY;
 	}
+	for_each_possible_cpu(cpu) {
+		struct cpuidle_device *cur = *per_cpu_ptr(cpuidle_devices_p, cpu);
+
+		acpi_dev[cpu] = *per_cpu_ptr(acpi_devs, cpu);
+		if (cur && cur != acpi_dev[cpu]) {
+			pr_err("cpu%d: unexpected cpuidle device\n", cpu);
+			return -EBUSY;
+		}
+	}
+
+	/*
+	 * From here on the load never fails: a failed module is freed at once, and a CPU still
+	 * inside its idle code would jump into freed memory (2026-11-19 boot panic). On any
+	 * problem the module stays loaded and inactive, the CPUs use WFI until reboot.
+	 */
+
+	/* 1. take every CPU off the ACPI driver: they fall back to WFI (PSCI "running") */
+	for_each_possible_cpu(cpu)
+		if (*per_cpu_ptr(cpuidle_devices_p, cpu))
+			cpuidle_unregister_device(acpi_dev[cpu]);
+	if (cpuidle_get_driver() == acpi_drv)
+		cpuidle_unregister_driver(acpi_drv);
+	for_each_possible_cpu(cpu)
+		if (*per_cpu_ptr(cpuidle_devices_p, cpu)) {
+			pr_err("cpu%d: ACPI idle device still registered; inactive, WFI until reboot\n", cpu);
+			return 0;
+		}
 
 	/* 2. same steps as nvpep.sys at load */
 	r = osi ? set_mode(PSCI_1_0_SUSPEND_MODE_OSI) : 0;
 	pr_info("SET_SUSPEND_MODE(OSI) = %ld%s\n", r, osi ? "" : " (skipped: osi=0, PC mode)");
 	if (r) {
 		/* mode unknown: the ACPI driver would spin if it is OSI, so stay in WFI */
-		pr_err("could not switch to OSI; CPUs stay in WFI until reboot\n");
-		return -EIO;
+		pr_err("could not switch to OSI; inactive, WFI until reboot\n");
+		return 0;
 	}
 	if (osi && pep)
 		windows_pep_init();	/* the OSI marker would be wrong in PC mode */
 
-	/* 3. our driver */
+	/* 3. our driver (cpuidle_register() undoes its own partial registration) */
 	ret = cpuidle_register(&osi_drv, NULL);
 	if (ret) {
 		r = osi ? set_mode(PSCI_1_0_SUSPEND_MODE_PC) : 0;
 		pr_err("cpuidle_register: %d; back to PC mode: %ld\n", ret, r);
 		if (r == 0)
 			restore_acpi();
-		return ret;
+		else
+			pr_err("inactive, WFI until reboot\n");
+		return 0;
 	}
+	active = true;
 	pr_info("OSI idle active (max_depth %d)\n", max_depth);
 	return 0;
 }
@@ -355,7 +379,7 @@ static void __exit osi_exit(void)
 	long r;
 	int i;
 
-	if (!enable)
+	if (!active)
 		return;
 
 	cpuidle_unregister(&osi_drv);	/* every CPU in WFI from here */

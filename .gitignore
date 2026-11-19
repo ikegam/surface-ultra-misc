@@ -19,3 +19,4 @@ NVIDIA-kernel-module-source-*
 logs/
 dump/
 *.so
+__pycache__/

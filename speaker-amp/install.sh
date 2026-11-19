@@ -16,6 +16,9 @@ reload=1
 FW=/usr/lib/firmware/updates/realtek/rt1320
 UCM=/usr/share/alsa/ucm2/conf.d/mt8901-soundwir/HiFi-surface-laptop-ultra.conf
 GAIN=/usr/local/lib/surface-ultra-misc/speaker-amp-gain
+HOOK=/usr/lib/systemd/system-sleep/surface-ultra-amp-sleep
+RULES=/etc/udev/rules.d/61-surface-ultra-amp.rules
+OPTS=/etc/modprobe.d/n1x-rt1320-silence.conf
 PKG=n1x-rt1320-sdw VER=7.3-surface1 SRC=/usr/src/$PKG-$VER
 
 # 1. firmware, from the Realtek driver in your Windows install
@@ -66,6 +69,15 @@ if [ -f "$UCM" ] && ! grep -q speaker-amp-gain "$UCM"; then
     sed -i "/cset \"name='rt1320-2 FU21 Playback Volume'/a\\\\t\\texec \"-$GAIN\"" "$UCM"
     grep -q speaker-amp-gain "$UCM" || echo "!! could not add the gain hook to $UCM; the amps stay at -9 dB"
 fi
+
+# 4. amp silence detection off: with it on, one amp comes back ~2.5 s after the other
+echo "options snd_soc_rt1320_sdw silence_detect=0" > "$OPTS"; chmod 644 "$OPTS"
+
+# 5. power the amps off through s2idle (sleep hook), and power-cycle them when the driver
+#    finds an amp DSP not running at playback start (udev rule -> hook "recover")
+install -D -m755 "$here/surface-ultra-amp-sleep" "$HOOK"
+install -D -m644 "$here/61-surface-ultra-amp.rules" "$RULES"
+udevadm control --reload
 
 if [ $reload = 1 ]; then
     "$here/reload.sh"

@@ -2905,6 +2905,59 @@ static void rt1321_preset(struct rt1320_sdw_priv *rt1320)
 	}
 }
 
+/*
+ * Amp silence detection, 0xc044 bits 7:5 (the R0 calibration turns them off
+ * while it measures). -1 keeps what the preset writes (on); 0/1 force it.
+ * With it on, after ~15 s of digital silence one amp at random comes back
+ * ~2.5 s after the other (measured with the built-in mic); install.sh sets 0.
+ */
+static int silence_detect = -1;
+static struct sdw_driver rt1320_sdw_driver;
+
+static void rt1320_apply_silence_detect(struct rt1320_sdw_priv *rt1320)
+{
+	struct device *dev = &rt1320->sdw_slave->dev;
+	unsigned int val = 0;
+
+	if (silence_detect < 0 || rt1320->dev_id != RT1320_DEV_ID)
+		return;
+	regmap_update_bits(rt1320->regmap, 0xc044, 0xe0, silence_detect ? 0xe0 : 0x00);
+	regcache_cache_bypass(rt1320->regmap, true);
+	regmap_read(rt1320->regmap, 0xc044, &val);
+	regcache_cache_bypass(rt1320->regmap, false);
+	dev_info(dev, "silence detection %s (0xc044=%02x)\n", silence_detect ? "on" : "off", val);
+}
+
+static int rt1320_silence_detect_one(struct device *dev, void *data)
+{
+	struct rt1320_sdw_priv *rt1320 = dev_get_drvdata(dev);
+
+	if (!rt1320 || !rt1320->hw_init)
+		return 0;
+	if (pm_runtime_resume_and_get(dev) < 0)
+		return 0;
+	rt1320_apply_silence_detect(rt1320);
+	pm_runtime_put_autosuspend(dev);
+	return 0;
+}
+
+static int silence_detect_set(const char *val, const struct kernel_param *kp)
+{
+	int ret = param_set_int(val, kp);
+
+	if (ret || silence_detect < 0 || !rt1320_sdw_driver.driver.p)
+		return ret;
+	return driver_for_each_device(&rt1320_sdw_driver.driver, NULL, NULL,
+				      rt1320_silence_detect_one);
+}
+
+static const struct kernel_param_ops silence_detect_ops = {
+	.set = silence_detect_set,
+	.get = param_get_int,
+};
+module_param_cb(silence_detect, &silence_detect_ops, &silence_detect, 0644);
+MODULE_PARM_DESC(silence_detect, "Amp silence detection: -1 = preset default, 0 = off, 1 = on (applies at once)");
+
 static int rt1320_io_init(struct device *dev, struct sdw_slave *slave)
 {
 	struct rt1320_sdw_priv *rt1320 = dev_get_drvdata(dev);
@@ -2996,6 +3049,7 @@ static int rt1320_io_init(struct device *dev, struct sdw_slave *slave)
 		regmap_write(rt1320->regmap,
 			SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT0, RT1320_SDCA_CTL_FUNC_STATUS, 0),
 			FUNCTION_NEEDS_INITIALIZATION);
+		rt1320_apply_silence_detect(rt1320);
 
 		/* reload DSP FW */
 		if (rt1320->fw_load_done)
@@ -3789,6 +3843,27 @@ static int rt1320_sdw_hw_params(struct snd_pcm_substream *substream,
 
 	if (!rt1320->sdw_slave)
 		return -EINVAL;
+
+	/*
+	 * A long runtime suspend sometimes leaves one amp's DSP not running (the
+	 * stereo image shifts to the other side). Check it whenever playback
+	 * starts; if it is gone, tell userspace, which power-cycles the amps
+	 * (udev: 61-surface-ultra-amp.rules).
+	 */
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK && rt1320->fw_load_done) {
+		bool running;
+
+		rt1320_dsp_dump(rt1320, "at playback");
+		regcache_cache_bypass(rt1320->regmap, true);
+		running = rt1320_dsp_running_fw(rt1320);
+		regcache_cache_bypass(rt1320->regmap, false);
+		if (!running) {
+			char *env[] = { "RT1320_DSP=lost", NULL };
+
+			dev_warn(dai->dev, "dsp: not running at playback start, asking for an amp power cycle\n");
+			kobject_uevent_env(&rt1320->sdw_slave->dev.kobj, KOBJ_CHANGE, env);
+		}
+	}
 
 	/* SoundWire specific configuration */
 	snd_sdw_params_to_config(substream, params, &stream_config, &port_config);

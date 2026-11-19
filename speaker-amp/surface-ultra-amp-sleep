@@ -1,0 +1,84 @@
+#!/bin/bash
+# systemd-sleep hook for the Surface Laptop Ultra speaker amps (2x RT1320).
+# Linux never runs ACPI CNT0._PS3/_PS0, so the amps stay powered through s2idle and their DSP
+# can come back broken. Do what Windows does instead: cut the amp LDOs (GPIO 47 = AMP2,
+# 74 = AMP1) before sleep and bring the amps up from scratch after resume.
+# Sound is gone for ~20-25 s after resume while the card, the DSP FW and PipeWire come back.
+# Also run by udev (61-surface-ultra-amp.rules) as "recover" when the driver finds an amp
+# DSP not running at playback start.
+# Installed by install.sh to /usr/lib/systemd/system-sleep/ (mode 755).
+set -u
+SELF=$(readlink -f "$0")
+DRV=/sys/bus/platform/drivers/mtk_sdw_mc
+HOLD=amp-ldo-off                 # gpioset consumer name; the process keeps the LDOs off
+log() { echo "amp-sleep: $*" > /dev/kmsg; }
+
+users() { for d in /run/user/[0-9]*; do [ -S "$d/pipewire-0" ] && basename "$d"; done; }
+usr() {  # usr <uid> systemctl args...
+	local uid=$1; shift
+	timeout 10 runuser -u "$(id -nu "$uid")" -- env XDG_RUNTIME_DIR=/run/user/$uid systemctl --user "$@"
+}
+
+case "${1:-}" in
+pre)
+	U=$(users)
+	echo "$U" > /run/amp-sleep.users
+	for uid in $U; do
+		usr "$uid" stop pipewire.socket pipewire-pulse.socket pipewire pipewire-pulse wireplumber
+	done
+	[ -e $DRV/mtk_sdw_mc ] && timeout 10 sh -c "echo mtk_sdw_mc > $DRV/unbind"
+	timeout 10 rmmod snd_soc_rt1320_sdw 2>/dev/null
+	gpioset -z -C $HOLD -c gpiochip0 47=0 74=0
+	pgrep -f -- "gpioset -z -C $HOLD" >/dev/null && log "amps off (LDOs held low)" || log "!! could not hold the LDOs low"
+	;;
+post)
+	# don't hold up resume: bring the amps back in a separate unit
+	systemd-run --no-block --collect --unit=surface-ultra-amp-resume "$SELF" resume
+	;;
+resume)
+	sleep 2                       # let the SoundWire masters and the rest of the system settle
+	pkill -f -- "gpioset -z -C $HOLD"   # gpioset rewrites its argv ("47 0"), so match the prefix
+	sleep 0.5
+	timeout 1 gpioset -c gpiochip0 47=1 74=1
+	sleep 2
+	modprobe snd_soc_rt1320_sdw
+	sleep 2
+	[ -e $DRV/mtk_sdw_mc ] || echo mtk_sdw_mc > $DRV/bind
+	# The driver loads the DSP FW ~10 s after the card is up, but only while the amps are
+	# idle. PipeWire may open the speaker at once, so start it only after both
+	# amps run the DSP FW (or give up after 60 s and run without it).
+	for i in $(seq 60); do
+		sleep 1
+		n=0
+		for a in 1 2; do
+			amixer -c mt8901soundwire cget name="rt1320-$a DSP FW Update" 2>/dev/null |
+				grep -q 'values=on' && n=$((n + 1))
+		done
+		[ $n = 2 ] && break
+	done
+	log "DSP FW on $n/2 amps after ${i} s"
+	for uid in $(cat /run/amp-sleep.users 2>/dev/null); do
+		usr "$uid" start pipewire.socket pipewire-pulse.socket wireplumber pipewire pipewire-pulse
+		for unit in xdg-desktop-portal-hyprland xdg-desktop-portal; do
+			usr "$uid" -q is-active $unit && usr "$uid" restart $unit
+		done
+	done
+	if grep -q mt8901 /proc/asound/cards; then log "amps on, card back"; else log "!! card missing"; fi
+	;;
+recover)
+	# The driver found an amp DSP not running at playback start (udev,
+	# 61-surface-ultra-amp.rules). Power-cycle the amps, at most once per 10 min
+	# so a DSP that never comes back cannot loop.
+	stamp=/run/amp-sleep.recover
+	if [ -n "$(find $stamp -mmin -10 2>/dev/null)" ]; then
+		log "DSP lost again within 10 min of a power cycle; leaving it"
+		exit 0
+	fi
+	touch $stamp
+	log "DSP lost at playback start: power-cycling the amps"
+	"$SELF" pre
+	sleep 3
+	"$SELF" resume
+	;;
+esac
+exit 0

@@ -658,7 +658,67 @@
  }
  
  static void rt1320_vc_preset(struct rt1320_sdw_priv *rt1320)
-@@ -2471,6 +2960,25 @@
+@@ -2416,6 +2905,59 @@
+ 	}
+ }
+ 
++/*
++ * Amp silence detection, 0xc044 bits 7:5 (the R0 calibration turns them off
++ * while it measures). -1 keeps what the preset writes (on); 0/1 force it.
++ * With it on, after ~15 s of digital silence one amp at random comes back
++ * ~2.5 s after the other (measured with the built-in mic); install.sh sets 0.
++ */
++static int silence_detect = -1;
++static struct sdw_driver rt1320_sdw_driver;
++
++static void rt1320_apply_silence_detect(struct rt1320_sdw_priv *rt1320)
++{
++	struct device *dev = &rt1320->sdw_slave->dev;
++	unsigned int val = 0;
++
++	if (silence_detect < 0 || rt1320->dev_id != RT1320_DEV_ID)
++		return;
++	regmap_update_bits(rt1320->regmap, 0xc044, 0xe0, silence_detect ? 0xe0 : 0x00);
++	regcache_cache_bypass(rt1320->regmap, true);
++	regmap_read(rt1320->regmap, 0xc044, &val);
++	regcache_cache_bypass(rt1320->regmap, false);
++	dev_info(dev, "silence detection %s (0xc044=%02x)\n", silence_detect ? "on" : "off", val);
++}
++
++static int rt1320_silence_detect_one(struct device *dev, void *data)
++{
++	struct rt1320_sdw_priv *rt1320 = dev_get_drvdata(dev);
++
++	if (!rt1320 || !rt1320->hw_init)
++		return 0;
++	if (pm_runtime_resume_and_get(dev) < 0)
++		return 0;
++	rt1320_apply_silence_detect(rt1320);
++	pm_runtime_put_autosuspend(dev);
++	return 0;
++}
++
++static int silence_detect_set(const char *val, const struct kernel_param *kp)
++{
++	int ret = param_set_int(val, kp);
++
++	if (ret || silence_detect < 0 || !rt1320_sdw_driver.driver.p)
++		return ret;
++	return driver_for_each_device(&rt1320_sdw_driver.driver, NULL, NULL,
++				      rt1320_silence_detect_one);
++}
++
++static const struct kernel_param_ops silence_detect_ops = {
++	.set = silence_detect_set,
++	.get = param_get_int,
++};
++module_param_cb(silence_detect, &silence_detect_ops, &silence_detect, 0644);
++MODULE_PARM_DESC(silence_detect, "Amp silence detection: -1 = preset default, 0 = off, 1 = on (applies at once)");
++
+ static int rt1320_io_init(struct device *dev, struct sdw_slave *slave)
+ {
+ 	struct rt1320_sdw_priv *rt1320 = dev_get_drvdata(dev);
+@@ -2471,6 +3013,25 @@
  
  	/* initialization write */
  	if ((amp_func_status & FUNCTION_NEEDS_INITIALIZATION) || !rt1320->first_hw_init) {
@@ -684,7 +744,15 @@
  		switch (rt1320->dev_id) {
  		case RT1320_DEV_ID:
  			if (rt1320->version_id < RT1320_VC)
-@@ -2526,6 +3034,8 @@
+@@ -2488,6 +3049,7 @@
+ 		regmap_write(rt1320->regmap,
+ 			SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT0, RT1320_SDCA_CTL_FUNC_STATUS, 0),
+ 			FUNCTION_NEEDS_INITIALIZATION);
++		rt1320_apply_silence_detect(rt1320);
+ 
+ 		/* reload DSP FW */
+ 		if (rt1320->fw_load_done)
+@@ -2526,6 +3088,8 @@
  	rt1320->first_hw_init = true;
  	rt1320->hw_init = true;
  
@@ -693,7 +761,7 @@
  	pm_runtime_put_autosuspend(&slave->dev);
  
  	dev_dbg(&slave->dev, "%s hw_init complete\n", __func__);
-@@ -2589,12 +3099,14 @@
+@@ -2589,12 +3153,14 @@
  
  	switch (event) {
  	case SND_SOC_DAPM_POST_PMU:
@@ -708,7 +776,7 @@
  		regmap_write(rt1320->regmap,
  			SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23,
  				RT1320_SDCA_CTL_REQ_POWER_STATE, 0), ps3);
-@@ -3019,9 +3531,18 @@
+@@ -3019,9 +3585,18 @@
  	if (ret < 0 && ret != -EACCES)
  		return ret;
  
@@ -729,7 +797,7 @@
  
  	if (!ucontrol->value.integer.value[0])
  		rt1320->fw_load_done = false;
-@@ -3057,8 +3578,11 @@
+@@ -3057,8 +3632,11 @@
  		return ret;
  
  	if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF &&
@@ -742,7 +810,7 @@
  
  	if (!ucontrol->value.integer.value[0])
  		rt1320->rae_update_done = false;
-@@ -3250,9 +3774,13 @@
+@@ -3250,9 +3828,13 @@
  	struct sdw_port_config port_config;
  	struct sdw_port_config dmic_port_config[2];
  	struct sdw_stream_runtime *sdw_stream;
@@ -757,7 +825,35 @@
  	dev_dbg(dai->dev, "%s %s", __func__, dai->name);
  	sdw_stream = snd_soc_dai_get_dma_data(dai, substream);
  
-@@ -3280,6 +3808,21 @@
+@@ -3262,6 +3844,27 @@
+ 	if (!rt1320->sdw_slave)
+ 		return -EINVAL;
+ 
++	/*
++	 * A long runtime suspend sometimes leaves one amp's DSP not running (the
++	 * stereo image shifts to the other side). Check it whenever playback
++	 * starts; if it is gone, tell userspace, which power-cycles the amps
++	 * (udev: 61-surface-ultra-amp.rules).
++	 */
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK && rt1320->fw_load_done) {
++		bool running;
++
++		rt1320_dsp_dump(rt1320, "at playback");
++		regcache_cache_bypass(rt1320->regmap, true);
++		running = rt1320_dsp_running_fw(rt1320);
++		regcache_cache_bypass(rt1320->regmap, false);
++		if (!running) {
++			char *env[] = { "RT1320_DSP=lost", NULL };
++
++			dev_warn(dai->dev, "dsp: not running at playback start, asking for an amp power cycle\n");
++			kobject_uevent_env(&rt1320->sdw_slave->dev.kobj, KOBJ_CHANGE, env);
++		}
++	}
++
+ 	/* SoundWire specific configuration */
+ 	snd_sdw_params_to_config(substream, params, &stream_config, &port_config);
+ 
+@@ -3280,6 +3883,21 @@
  				dmic_port_config[0].num = 8;
  				dmic_port_config[1].ch_mask = BIT(0) | BIT(1);
  				dmic_port_config[1].num = 10;
@@ -779,7 +875,7 @@
  				break;
  			case RT1321_DEV_ID:
  				num_channels = params_channels(params);
-@@ -3300,7 +3843,7 @@
+@@ -3300,7 +3918,7 @@
  		switch (rt1320->dev_id) {
  		case RT1320_DEV_ID:
  			retval = sdw_stream_add_slave(rt1320->sdw_slave, &stream_config,
@@ -788,7 +884,7 @@
  			break;
  		case RT1321_DEV_ID:
  			retval = sdw_stream_add_slave(rt1320->sdw_slave, &stream_config,
-@@ -3429,6 +3972,8 @@
+@@ -3429,6 +4047,8 @@
  	if (!rt1320->first_hw_init)
  		return 0;
  
@@ -797,7 +893,7 @@
  	ret = pm_runtime_resume(component->dev);
  	dev_dbg(&rt1320->sdw_slave->dev, "%s pm_runtime_resume, ret=%d", __func__, ret);
  	if (ret < 0 && ret != -EACCES)
-@@ -3560,6 +4105,7 @@
+@@ -3560,6 +4180,7 @@
  	rt1320->brown_out = 1;
  
  	INIT_WORK(&rt1320->load_dspfw_work, rt1320_load_dspfw_work);
@@ -805,7 +901,7 @@
  
  	ret =  devm_snd_soc_register_component(dev,
  				&soc_component_sdw_rt1320,
-@@ -3609,7 +4155,26 @@
+@@ -3609,7 +4230,26 @@
  {
  	struct  rt1320_sdw_priv *rt1320 = dev_get_drvdata(&slave->dev);
  

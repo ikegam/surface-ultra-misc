@@ -325,6 +325,21 @@ This directory builds them **from your own Windows install** and changes the dri
     ACPI maximum (8 s) there and skips the load if it doesn't get there, then gives PDE23 back to what DAPM last
     asked for (stock code always ended in PS3). Note: with `0xc081` bit 2 clear (idle in PS3, fresh amp) `0xf01e`
     and DSP RAM read back `0xdeadbeef`; that alone is not a broken DSP.
+  - checks at every playback start that both DSPs run (the registers go to the log as `dsp at playback:`). After a
+    long runtime suspend one amp's DSP was sometimes not running, and the stereo image moved to the other side. If
+    it is not running, the driver sends a uevent (`RT1320_DSP=lost`), and the udev rule `61-surface-ultra-amp.rules`
+    power-cycles the amps through the sleep hook below (at most once per 10 min).
+  - module option `silence_detect` (-1 = preset, on; 0 = off; 1 = on; applies at once). With the amps' silence
+    detection on, after ~15 s of digital silence one amp came back ~2.5 s after the other. `install.sh` sets
+    `silence_detect=0` in `/etc/modprobe.d/n1x-rt1320-silence.conf`.
+- `surface-ultra-amp-sleep` (systemd-sleep hook, installed to `/usr/lib/systemd/system-sleep/`) powers the amps
+  off for s2idle, as Windows does with `CNT0._PS3`. Linux never runs it, so the amps stayed powered through sleep
+  and the DSP could come back broken. Before sleep it stops PipeWire, unbinds the card, unloads the amp driver and
+  holds the amp LDO enables (GPIO 47/74) low. After resume it powers the amps up, rebuilds the card, waits until
+  both amps run the DSP firmware, then starts PipeWire and restarts the desktop portals. The speakers are silent
+  for ~20-25 s after resume.
+- With the playback-start check, the speaker no-suspend rule (`speaker-tuning/no-suspend.sh`) is no longer needed:
+  the speakers may suspend again, which saves ~0.8 W at idle.
 - `amp-power-cycle.sh` (rescue, normally not needed) power-cycles both amps through their LDO enables, as ACPI
   `CNT0._PS3`/`_PS0` do on Windows (GPIO 74 = amp 1, GPIO 47 = amp 2); Linux never calls those. Use it when the
   speakers crackle or drop out after a bus error: a module reload alone leaves the amps in that state. Module
@@ -337,7 +352,7 @@ This directory builds them **from your own Windows install** and changes the dri
 
 ```
 cd speaker-amp
-sudo ./install.sh            # firmware + DKMS driver, then rebuilds the sound card
+sudo ./install.sh            # firmware + DKMS driver + sleep hook, then rebuilds the sound card
 sudo ./install.sh --no-reload  # same, takes effect at the next boot
 ./status.sh                  # DSP FW / tuning / gain of both amps
 sudo ./uninstall.sh

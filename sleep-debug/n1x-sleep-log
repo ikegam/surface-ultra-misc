@@ -44,14 +44,14 @@ pre)
 post)
 	if read -r t0 e0 ac0 < "$estamp" 2>/dev/null; then
 		t1=$(date +%s) e1=$(cat $bat/energy_now) ac1=$(cat /sys/class/power_supply/ADP1/online)
-		lpi6=$(cat /sys/devices/system/cpu/cpu0/cpuidle/state6/disable 2>/dev/null)
+		s2d=$(cat /sys/module/n1x_osi_idle/parameters/s2idle_depth 2>/dev/null)
 		dvfsrc=$(python3 -I -c 'import mmap,os,struct;f=os.open("/dev/mem",os.O_RDONLY|os.O_SYNC);m=mmap.mmap(f,4096,mmap.MAP_SHARED,mmap.PROT_READ,offset=0x12F000);print(struct.unpack_from("<I",m,0xC00)[0])' 2>/dev/null)
 		awk -v t0="$t0" -v t1="$t1" -v e0="$e0" -v e1="$e1" -v ac="$ac0$ac1" -v hw="$(cat /sys/power/suspend_stats/last_hw_sleep 2>/dev/null)" \
-		    -v lpi6="$lpi6" -v dv="$dvfsrc" -v now="$(now)" 'BEGIN {
+		    -v s2d="$s2d" -v dv="$dvfsrc" -v now="$(now)" 'BEGIN {
 			dt = t1 - t0; de = (e0 - e1) / 1e6
 			w = (dt > 0 && ac == "00") ? sprintf("%.2f W", de * 3600 / dt) : (ac != "00" ? "n/a (AC)" : "n/a")
-			printf "energy %s: slept %dm%02ds (hw %.0fs), %.2f Wh used, avg %s  [lpi6_off=%s dvfsrc=%s]\n",
-			       now, dt / 60, dt % 60, hw / 1e6, de, w, lpi6, dv }' >> "$elog"
+			printf "energy %s: slept %dm%02ds (hw %.0fs), %.2f Wh used, avg %s  [s2idle_depth=%s dvfsrc=%s]\n",
+			       now, dt / 60, dt % 60, hw / 1e6, de, w, s2d, dv }' >> "$elog"
 	fi
 	date +%s > "$stamp"
 	# s2idle wake cycles (one "Timekeeping suspended" per cycle) and the IRQs that grew

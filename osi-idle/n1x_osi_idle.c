@@ -75,6 +75,15 @@ static int max_depth = 4;
 module_param(max_depth, int, 0644);
 MODULE_PARM_DESC(max_depth, "Deepest state outside s2idle: 1 core, 2 cluster, 3/4 package, 5 DRIPS (hangs)");
 
+/*
+ * s2idle_depth: what s2idle asks for. 5 = Standby-DRIPS (default, like Windows). Long lid-closed
+ * sleeps still die inside DRIPS (BERT 0xa0000004, with and without OSI), so 4 (PGKLL) is there to
+ * tell DRIPS itself apart from the package power-down. Takes effect on the next suspend.
+ */
+static int s2idle_depth = 5;
+module_param(s2idle_depth, int, 0644);
+MODULE_PARM_DESC(s2idle_depth, "State s2idle asks for: 1 core, 2 cluster, 3/4 package, 5 DRIPS (default)");
+
 #define NCPU		20
 #define CLUSTER(c)	((c) / 10)
 
@@ -239,7 +248,7 @@ static int osi_enter(struct cpuidle_device *dev, struct cpuidle_driver *drv, int
 
 static int osi_enter_s2idle(struct cpuidle_device *dev, struct cpuidle_driver *drv, int index)
 {
-	__osi_enter(dev, S_DRIPS, true);
+	__osi_enter(dev, clamp_t(int, READ_ONCE(s2idle_depth), S_CORE, S_DRIPS), true);
 	return 0;
 }
 
@@ -402,7 +411,7 @@ static int __init osi_init(void)
 		return 0;
 	}
 	active = true;
-	pr_info("OSI idle active (max_depth %d)\n", max_depth);
+	pr_info("OSI idle active (max_depth %d, s2idle_depth %d)\n", max_depth, s2idle_depth);
 	return 0;
 }
 

@@ -1,0 +1,4 @@
+#!/bin/sh
+# NetworkManager resets power save when a Wi-Fi connection comes up; set it again.
+[ "$2" = up ] && exec /usr/local/sbin/surface-wifi-powersave
+exit 0

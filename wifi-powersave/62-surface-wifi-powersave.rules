@@ -1,0 +1,2 @@
+# Surface Laptop Ultra: Wi-Fi power save on battery only.
+SUBSYSTEM=="power_supply", KERNEL=="ADP1", ACTION=="change", RUN+="/usr/local/sbin/surface-wifi-powersave"

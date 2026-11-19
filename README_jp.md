@@ -26,6 +26,7 @@ teo-casares さんによる、この機種で Omarchy を動かす取り組み�
 | `osi-idle/` | Windows と同じ PSCI OS-initiated モードで CPU アイドルと s2idle を動かす(試験中) | 独立 |
 | `sleep-debug/` | サスペンドの診断:最後の PM 段階を UEFI 変数に残す、起動時のレポート、サスペンドごとのログ | 独立 |
 | `keyboard/` | Caps Lock の遅れ、キー再マップでの連打 | 独立 |
+| `wifi-powersave/` | バッテリー時だけ Wi-Fi の省電力 | 独立 |
 | `audio-jack/` | ヘッドホンジャックの検出 | 独立(上流の Realtek ドライバ) |
 | `speaker-amp/` | スピーカー: Windows のアンプ DSP ファームとチューニングで鳴らす | 独立。teo さんの音声環境(UCM プロファイル、`n1x-sdw-settle`)と組み合わせて動く |
 | `speaker-tuning/` | スピーカー: Windows の Dolby チューニングを PipeWire フィルタに(任意) | 独立 |
@@ -294,6 +295,14 @@ sudo ./install.sh      # DKMS、すぐ読み込む。collector は次の起動�
 sudo ./uninstall.sh    # UEFI 変数も消す
 ```
 
+`sudo ./install.sh --panic` は、タスクのハングや CPU のロックアップを panic に変えます。カーネルログの末尾が efi-pstore に
+残り、10 秒後に再起動します(`systemd-pstore` が `/var/lib/systemd/pstore` に写します)。`pm_debug_messages` と
+`pm_print_times` も有効にします。`uninstall.sh` で戻ります。
+
+`pm-test-loop.sh [freezer|devices|platform] [回数]`(root)は、サスペンドの処理をその `pm_test` の段階まで進めてすぐ戻す
+のを繰り返します(既定 30 回)。各回の前に `/var/log/n1x-pmtest.log` に書いて fsync するので、電源が落ちたら最後の行で
+どの回で落ちたか分かります。作業は先に保存してください。
+
 ## keyboard: Caps Lock の遅れ
 
 内蔵キーボードの LED は HID over I2C の遅い書き込みの向こうにあり、LED のトリガー `kbd-capslock` がキー状態に連動して
@@ -310,6 +319,19 @@ sudo ./uninstall.sh
 押した報告の約 15 ms 前にようやく届きます(原因は調査中。GPIO の割り込み EINT 139 の扱いを疑っています)。キーボードの生の入力を記録すると
 20 ms 未満の押下は 1 回もありませんでしたが、keyd を通した仮想キーボードでは 3〜17 ms の押下が何回も出ていて、連打に
 見えていました。Caps→Ctrl などは keyd を使わず、Hyprland の `kb_options = ctrl:nocaps` やキー割り当てで行うのが安全です。
+
+## wifi-powersave: バッテリー時だけ Wi-Fi の省電力
+
+Omarchy は Wi-Fi の省電力を常に切っています(NetworkManager の `wifi.powersave=2`)。バッテリー時に入れると、この機械
+(MT7925)ではアイドル時に約 0.4 W 減ります。`surface-wifi-powersave` は `ADP1` が外れていれば省電力を入れ、AC なら
+切ります。AC の抜き差しで udev ルールが、接続が上がったあとで NetworkManager の dispatcher スクリプトが呼びます
+(そのとき NetworkManager が設定を戻すため)。
+
+```
+cd wifi-powersave
+sudo ./install.sh      # すぐ反映。iw が必要
+sudo ./uninstall.sh    # 切った状態に戻す
+```
 
 ## audio-jack: ヘッドホンジャックの検出
 

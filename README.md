@@ -26,6 +26,7 @@ Start there; the pieces below assume that setup.
 | [`osi-idle/`](#osi-idle-os-initiated-cpu-idle-like-windows) | CPU idle and s2idle in PSCI OS-initiated mode, as Windows runs the SoC (experimental) | independent |
 | [`sleep-debug/`](#sleep-debug-suspend-diagnostics) | suspend diagnostics: last PM phase in a UEFI variable, boot-time report, per-suspend log | independent |
 | [`keyboard/`](#keyboard-caps-lock-lag) | Caps Lock lag; repeated keys through a key remapper | independent |
+| [`wifi-powersave/`](#wifi-powersave-wi-fi-power-save-on-battery) | Wi-Fi power save on battery only | independent |
 | [`audio-jack/`](#audio-jack-headphone-detection) | headphone jack detection | independent (upstream Realtek driver) |
 | [`speaker-amp/`](#speaker-amp-windows-amp-dsp-firmware-and-tuning) | speakers: run the amps' DSP firmware and tuning from Windows | independent; works with their audio setup (UCM profile, `n1x-sdw-settle`) |
 | [`speaker-tuning/`](#speaker-tuning-dolby-tuning-as-a-pipewire-filter) | speakers: Windows Dolby tuning as a PipeWire filter (optional) | independent |
@@ -303,6 +304,14 @@ sudo ./install.sh      # DKMS, loads at once; the collector runs from the next b
 sudo ./uninstall.sh    # also deletes the UEFI variable
 ```
 
+`sudo ./install.sh --panic` also turns a hung task or CPU lockup into a panic, so the kernel log tail lands in
+efi-pstore and the machine reboots 10 s later (`systemd-pstore` copies it to `/var/lib/systemd/pstore`), and turns
+on `pm_debug_messages` / `pm_print_times`. `uninstall.sh` undoes it.
+
+`pm-test-loop.sh [freezer|devices|platform] [count]` (root) runs the suspend path up to that `pm_test` level and
+straight back, 30 times by default, logging each cycle to `/var/log/n1x-pmtest.log` with an fsync first; after a
+power-off the last line names the cycle that died. Save your work first.
+
 ## keyboard: Caps Lock lag
 
 The built-in keyboard's LED sits behind slow HID-over-I2C writes, and every write made by the `kbd-capslock` LED
@@ -320,6 +329,19 @@ ms), only about 15 ms before the next key press (cause under investigation; the 
 suspected). A raw capture of the keyboard had no press shorter than 20 ms, but keyd's virtual keyboard showed several
 3-17 ms presses, which looked like repeated keys. Do remaps such as Caps→Ctrl with Hyprland (`kb_options =
 ctrl:nocaps`, key bindings) instead of keyd.
+
+## wifi-powersave: Wi-Fi power save on battery
+
+Omarchy turns Wi-Fi power save off for good (NetworkManager `wifi.powersave=2`). On battery, turning it on saves
+~0.4 W at idle here (MT7925). `surface-wifi-powersave` sets it on when `ADP1` is offline and off on AC; a udev rule
+runs it when AC is plugged or unplugged, and a NetworkManager dispatcher script runs it again after a connection
+comes up (NetworkManager resets the setting then).
+
+```
+cd wifi-powersave
+sudo ./install.sh      # applies at once; needs iw
+sudo ./uninstall.sh    # back to off
+```
 
 ## audio-jack: headphone detection
 

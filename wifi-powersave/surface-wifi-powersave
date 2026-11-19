@@ -1,0 +1,11 @@
+#!/bin/sh
+# Surface Laptop Ultra: Wi-Fi power save on battery only (2026-11-18: -0.4 W at idle).
+# Omarchy turns it off for good (NetworkManager wifi.powersave=2); keep that on AC.
+# Run by udev when AC is plugged/unplugged (62-surface-wifi-powersave.rules) and by
+# NetworkManager after a connection comes up (dispatcher.d/90-surface-wifi-powersave).
+ps=off
+[ "$(cat /sys/class/power_supply/ADP1/online 2>/dev/null)" = 0 ] && ps=on
+for i in $(iw dev | awk '/Interface/{print $2}'); do
+	iw dev "$i" set power_save $ps 2>/dev/null
+done
+exit 0

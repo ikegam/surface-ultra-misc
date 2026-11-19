@@ -10,4 +10,10 @@ rm -f /etc/systemd/system/n1x-sleep-collect.service /usr/local/bin/n1x-sleep-col
       /usr/lib/systemd/system-sleep/n1x-sleep-log
 v=/sys/firmware/efi/efivars/N1XSleepTrace-e592f01a-04b3-4563-8c48-1035716f772f
 [ -e "$v" ] && chattr -i "$v" && rm -f "$v"
+if [ -e /etc/sysctl.d/90-n1x-suspend-debug.conf ]; then
+	rm -f /etc/sysctl.d/90-n1x-suspend-debug.conf /etc/tmpfiles.d/n1x-suspend-debug.conf
+	sysctl -q kernel.softlockup_panic=0 kernel.hardlockup_panic=0 kernel.hung_task_panic=0 kernel.panic=0
+	echo 0 > /sys/power/pm_debug_messages
+	echo 0 > /sys/power/pm_print_times
+fi
 systemctl daemon-reload

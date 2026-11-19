@@ -42,3 +42,7 @@ sudo ./uninstall.sh                       # reboot afterwards to get the ACPI id
 
 Module parameters: `max_depth` (runtime, default 4: 1 core, 2 cluster, 3/4 package; 5 = DRIPS hangs the machine),
 `osi=0` (keep PC mode, only for testing the driver), `pep=0` (skip `ELST` and the SYSRAM writes).
+
+`s2idle_depth` (runtime, used from the next suspend; default 5 = Standby-DRIPS) is the state s2idle asks for.
+Long lid-closed sleeps still die inside DRIPS with the same BERT record (cause 0xa0000004) with or without
+OSI, so 4 (package power-down) is there to test whether DRIPS itself is the problem.

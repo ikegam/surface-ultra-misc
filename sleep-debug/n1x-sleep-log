@@ -15,6 +15,8 @@ estamp=/run/n1x-sleep-energy
 bat=/sys/class/power_supply/BAT1
 
 now() { date '+%F %T'; }
+# DVFSRC enable flag in SPM SYSRAM (0x12FC00); power_wrap writes 1 at probe, tests set 0
+dvfsrc() { python3 -I -c 'import mmap,os,struct;f=os.open("/dev/mem",os.O_RDONLY|os.O_SYNC);m=mmap.mmap(f,4096,mmap.MAP_SHARED,mmap.PROT_READ,offset=0x12F000);print(struct.unpack_from("<I",m,0xC00)[0])' 2>/dev/null; }
 up() { awk '{printf "%.2fh", $1/3600}' /proc/uptime; }
 
 case "$1" in
@@ -32,6 +34,7 @@ pre)
 		echo "camera: $(for d in /dev/video*; do fuser "$d" >/dev/null 2>&1 && printf '%s(open) ' "$d"; done) mods=$(lsmod | awk '/^(surface_ultra_cam|surface_ccu_boot|v4l2loopback) /{printf "%s:%s ", $1, $3}')"
 		echo "wakeup-enabled: $(for f in /sys/bus/*/devices/*/power/wakeup; do [ "$(cat "$f" 2>/dev/null)" = enabled ] && basename "$(dirname "$(dirname "$f")")"; done | paste -sd' ')"
 		echo "suspend_stats: success=$(cat /sys/power/suspend_stats/success) fail=$(cat /sys/power/suspend_stats/fail) last_failed=$(cat /sys/power/suspend_stats/last_failed_dev)/$(cat /sys/power/suspend_stats/last_failed_step) max_hw_sleep=$(cat /sys/power/suspend_stats/max_hw_sleep 2>/dev/null)"
+		echo "idle: s2idle_depth=$(cat /sys/module/n1x_osi_idle/parameters/s2idle_depth 2>/dev/null) dvfsrc=$(dvfsrc)"
 		echo "load: $(cat /proc/loadavg)"
 		ps -eo pcpu,rss,comm --sort=-pcpu --no-headers | head -5 | awk '{printf "%s%%/%dM/%s  ", $1, $2/1024, $3}' | sed 's/^/top: /'; echo
 	} >> "$log" 2>&1
@@ -45,7 +48,7 @@ post)
 	if read -r t0 e0 ac0 < "$estamp" 2>/dev/null; then
 		t1=$(date +%s) e1=$(cat $bat/energy_now) ac1=$(cat /sys/class/power_supply/ADP1/online)
 		s2d=$(cat /sys/module/n1x_osi_idle/parameters/s2idle_depth 2>/dev/null)
-		dvfsrc=$(python3 -I -c 'import mmap,os,struct;f=os.open("/dev/mem",os.O_RDONLY|os.O_SYNC);m=mmap.mmap(f,4096,mmap.MAP_SHARED,mmap.PROT_READ,offset=0x12F000);print(struct.unpack_from("<I",m,0xC00)[0])' 2>/dev/null)
+		dvfsrc=$(dvfsrc)
 		awk -v t0="$t0" -v t1="$t1" -v e0="$e0" -v e1="$e1" -v ac="$ac0$ac1" -v hw="$(cat /sys/power/suspend_stats/last_hw_sleep 2>/dev/null)" \
 		    -v s2d="$s2d" -v dv="$dvfsrc" -v now="$(now)" 'BEGIN {
 			dt = t1 - t0; de = (e0 - e1) / 1e6

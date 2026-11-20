@@ -4,6 +4,11 @@
 
 Part of [surface-ultra-misc](../README.md).
 
+**Currently off on the author's machine (2026-11-20).** It did not stop the resets. Since it went in, long
+lid-close sleeps started on battery no longer wake: the machine stays asleep (~0.4 W) and only a long press gets it back.
+Sleeps started on AC are unaffected. It is now loaded with `enable=0` (`/etc/modprobe.d/n1x-sapd-lps0.conf`:
+`options n1x_sapd_lps0 enable=0`) to test whether it causes this. Not proven either way yet.
+
 **Experimental, under evaluation.** About 1 in 7-10 lid-close s2idle suspends never came back here: the journal ends
 at `PM: suspend entry (s2idle)` and the SoC resets on its own, with no pstore record. The boot that follows then stalls
 in NVIDIA GSP init (`GspStatusQueueInit ... NV_ERR_TIMEOUT`, no display). A second long press of the power button

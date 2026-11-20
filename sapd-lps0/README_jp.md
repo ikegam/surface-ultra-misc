@@ -4,6 +4,11 @@
 
 [surface-ultra-misc](../README_jp.md) の一部です。
 
+**作者の機械では現在オフにしています(2026-11-20)。** リセットは止まりませんでした。また、導入以降、電池でふたを閉じた
+長時間のスリープから起きられなくなっています。眠ったまま(約 0.4 W)で、長押ししないと戻りません。AC で入ったスリープは
+問題ありません。これが原因かを確かめるため、`enable=0` で読み込んでいます(`/etc/modprobe.d/n1x-sapd-lps0.conf` に
+`options n1x_sapd_lps0 enable=0`)。どちらとも、まだ確定していません。
+
 **試験中で、効果はまだ評価中です。** この機械では、ふたを閉じた s2idle の 7〜10 回に 1 回ほどが復帰しませんでした。
 journal は `PM: suspend entry (s2idle)` で終わり、pstore にも記録が残らないまま SoC が自分でリセットします。その次の起動は
 NVIDIA の GSP 初期化(`GspStatusQueueInit ... NV_ERR_TIMEOUT`)で止まって画面が出ず、電源ボタンをもう一度長押しすると

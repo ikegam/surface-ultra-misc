@@ -13,6 +13,8 @@ rm -rf "$SRC"; install -d "$SRC"
 install -m644 "$here"/{Makefile,Kbuild,dkms.conf,n1x_sleep_trace.c} "$SRC/"
 dkms install "$PKG/$VER"
 echo n1x_sleep_trace > /etc/modules-load.d/n1x-sleep-trace.conf
+# Off by default: the tracer writes non-volatile UEFI variables right before DRIPS (see README).
+[ -e /etc/modprobe.d/n1x-sleep-trace.conf ] || echo "options n1x_sleep_trace enable=0" > /etc/modprobe.d/n1x-sleep-trace.conf
 install -m755 "$here/n1x-sleep-collect" /usr/local/bin/
 install -m644 "$here/n1x-sleep-collect.service" /etc/systemd/system/
 install -m755 "$here/n1x-sleep-log" /usr/lib/systemd/system-sleep/
@@ -29,4 +31,4 @@ if [ "${1:-}" = --panic ]; then
 	systemd-tmpfiles --create /etc/tmpfiles.d/n1x-suspend-debug.conf
 	echo "panic on hang: on (pstore backend: $(cat /sys/module/pstore/parameters/backend))"
 fi
-echo "OK: tracer loaded; boot reports go to /var/log/n1x-sleep-trace.log, per-suspend state to /var/log/n1x-sleep.log"
+echo "OK: tracer loaded (writes: $(cat /sys/module/n1x_sleep_trace/parameters/enable)); boot reports go to /var/log/n1x-sleep-trace.log, per-suspend state to /var/log/n1x-sleep.log"

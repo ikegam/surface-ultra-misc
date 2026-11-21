@@ -4,7 +4,8 @@
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
 rmmod n1x_sleep_trace 2>/dev/null
 dkms remove n1x-sleep-trace/1.0 --all
-rm -rf /usr/src/n1x-sleep-trace-1.0 /etc/modules-load.d/n1x-sleep-trace.conf
+rm -rf /usr/src/n1x-sleep-trace-1.0 /etc/modules-load.d/n1x-sleep-trace.conf \
+       /etc/modprobe.d/n1x-sleep-trace.conf
 systemctl disable n1x-sleep-collect.service 2>/dev/null
 rm -f /etc/systemd/system/n1x-sleep-collect.service /usr/local/bin/n1x-sleep-collect \
       /usr/lib/systemd/system-sleep/n1x-sleep-log

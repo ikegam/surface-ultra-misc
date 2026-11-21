@@ -20,6 +20,13 @@ pstore にも何も残りません。そこから先は RAM の中にしか無�
   復帰後は s2idle の起床回数、増えた IRQ、ハードウェアが眠っていた時間を書きます。バッテリー時は、寝ている間の平均電力も
   `n1x-sleep-trace.log` に残します。
 
+**トレーサは無効の状態で入ります**(`/etc/modprobe.d/n1x-sleep-trace.conf`: `options n1x_sleep_trace enable=0`)。
+作者の機械でも 2026-11-21 から無効です。1 回のサスペンドで不揮発の UEFI 変数に 10 回ほど書き、そのうち数回は DRIPS の
+直前、割り込み禁止の `tick_freeze()` の中で書きます。ちょうどその区間で電源が落ちうる機械では、ファームの変数領域(起動
+エントリ、Secure Boot の鍵)を壊すおそれがあります。調べたい段階のタイミングも変えてしまいます。有効にするのは、短い
+試験のときだけにしてください: `echo Y | sudo tee /sys/module/n1x_sleep_trace/parameters/enable`。collector と
+スリープログのフックは UEFI 変数に書かないので、有効のままです。
+
 ```
 === boot 8702c3ec collected 2026-11-19 23:13:37
 previous boot ended abruptly (not in suspend)

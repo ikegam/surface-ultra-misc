@@ -20,6 +20,14 @@ because everything after that is in RAM and lost with the power. Not needed to r
   `/var/log/n1x-sleep.log` and syncs it; after resume, the s2idle wake cycles, the IRQs that grew and the
   hardware sleep time. On battery it also logs the average power while asleep to `n1x-sleep-trace.log`.
 
+**The tracer is installed switched off** (`/etc/modprobe.d/n1x-sleep-trace.conf`: `options n1x_sleep_trace enable=0`),
+and is off on the author's machine since 2026-11-21. It writes a non-volatile UEFI variable about ten times per
+suspend, several of them from `tick_freeze()` with interrupts off, right before DRIPS. On a machine that may lose
+power in exactly that window this risks the firmware's variable store (boot entries, Secure Boot keys), and it
+changes the timing of the phase under test. Turn it on only for a short, deliberate test:
+`echo Y | sudo tee /sys/module/n1x_sleep_trace/parameters/enable`. The collector and the sleep log hook do not
+write UEFI variables and stay on.
+
 ```
 === boot 8702c3ec collected 2026-11-19 23:13:37
 previous boot ended abruptly (not in suspend)

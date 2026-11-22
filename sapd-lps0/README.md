@@ -9,9 +9,9 @@ lid-close sleeps started on battery no longer wake: the machine stays asleep (~0
 Sleeps started on AC are unaffected. It is now loaded with `enable=0` (`/etc/modprobe.d/n1x-sapd-lps0.conf`:
 `options n1x_sapd_lps0 enable=0`) to test whether it causes this.
 
-Result so far (2026-11-21): with it off, 4 of 4 lid-close sleeps started on battery woke by the lid alone (64, 176,
-284 and 332 min, about 0.7 W asleep). With it on, the last 4 of 4 did not. A full night on battery has not been
-tested yet, and it once woke after 243 min with the module on, so treat this as likely, not proven. Do not install
+Result (2026-11-22): with it off, 5 of 5 lid-close sleeps started on battery woke by the lid alone (64, 176, 284,
+332 and 339 min, the last one overnight; about 0.7 W asleep). With it on, the last 4 of 4 did not. It once woke
+after 243 min with the module on, so the mechanism is not understood, but the module stays off here. Do not install
 this module unless you want to repeat the experiment.
 
 **Experimental, under evaluation.** About 1 in 7-10 lid-close s2idle suspends never came back here: the journal ends

@@ -14,6 +14,11 @@ Result (2026-11-22): with it off, 5 of 5 lid-close sleeps started on battery wok
 after 243 min with the module on, so the mechanism is not understood, but the module stays off here. Do not install
 this module unless you want to repeat the experiment.
 
+Correction (2026-11-23): those 5 sleeps also ran with the `suspend/surface-ultra-lid-wakeup` hook switched off
+(`chmod -x`), so the result does not separate the two. The first lid-close suspend after the hook was switched back
+on (2026-11-22 12:14, started on AC, this module still off) never came back and the battery was empty 17 h later,
+which is more than s2idle draws. One failure, cause open: the hook is now the other suspect.
+
 **Experimental, under evaluation.** About 1 in 7-10 lid-close s2idle suspends never came back here: the journal ends
 at `PM: suspend entry (s2idle)` and the SoC resets on its own, with no pstore record. The boot that follows then stalls
 in NVIDIA GSP init (`GspStatusQueueInit ... NV_ERR_TIMEOUT`, no display). A second long press of the power button

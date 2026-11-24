@@ -4,7 +4,14 @@
 
 Part of [surface-ultra-misc](../README.md).
 
-**Experimental, under evaluation.** It targets the same s2idle resets as `sapd-lps0`: the trace shows the SoC dying
+**Experimental. Switched off on the author's machine since 2026-11-24, and `install.sh` now leaves it off unless
+`--enable` is given.** It did not stop the resets: from 2026-11-19 to 11-23, with this module on, 5 suspends died
+against about 6 good battery lid-closed sleeps, worse than the earlier rate of about 1 in 7-10. In the same days the
+speaker amp sleep hook and the UEFI tracer were also in use, so that does not show this module made things worse;
+all three were switched off together to get back to the earlier state. Sleep power is the same either way (~0.7 W;
+the kernel's own ACPI idle driver also reaches DRIPS).
+
+It targets the same s2idle resets as `sapd-lps0`: the trace shows the SoC dying
 inside Standby-DRIPS, the firmware's deepest state.
 
 Linux and Windows reach DRIPS on different firmware paths. Linux's ACPI LPI idle driver keeps PSCI in
@@ -33,7 +40,8 @@ The firmware refuses to switch from OSI back to PC mode. After an unload the CPU
 
 ```
 cd osi-idle
-sudo ./install.sh                         # DKMS, loads now and at every boot (enable=1 in /etc/modprobe.d)
+sudo ./install.sh                         # DKMS, module loaded at boot but OSI off (enable=0 in /etc/modprobe.d)
+sudo ./install.sh --enable                # OSI on now and at every boot (enable=1)
 cat /sys/module/n1x_osi_idle/parameters/stats   # CPU_SUSPEND: powered down, returned, DENIED, INVALID, other
 grep . /sys/module/n1x_osi_idle/parameters/st_*  # the same per requested state (WFI, core, cluster, pkg-SL, pkg-LL, DRIPS)
 sudo ./drips-count                        # firmware counters: DRIPS / package / cluster residency (ns) and usage

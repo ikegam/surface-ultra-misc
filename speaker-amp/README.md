@@ -54,6 +54,11 @@ This directory builds them **from your own Windows install** and changes the dri
   holds the amp LDO enables (GPIO 47/74) low. After resume it powers the amps up, rebuilds the card, waits until
   both amps run the DSP firmware, then starts PipeWire and restarts the desktop portals. The speakers are silent
   for ~20-25 s after resume.
+  **Switched off on the author's machine since 2026-11-24** (`sudo chmod -x` on the installed hook) while s2idle
+  resets are investigated: in the days it was in use the reset rate was higher (see [`osi-idle/`](../osi-idle/);
+  not shown to be the cause). Known bug: the resume step runs as a transient unit with a fixed name, so a second
+  suspend within ~30 s of a resume finds the unit still loaded (`Unit surface-ultra-amp-resume.service was already
+  loaded`) and the amps are not set up again before the next sleep.
 - With the playback-start check, the speaker no-suspend rule ([`speaker-tuning/no-suspend.sh`](../speaker-tuning/no-suspend.sh)) is no longer needed:
   the speakers may suspend again, which saves ~0.8 W at idle.
 - `amp-power-cycle.sh` (rescue, normally not needed) power-cycles both amps through their LDO enables, as ACPI

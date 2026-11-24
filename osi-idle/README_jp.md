@@ -4,7 +4,9 @@
 
 [surface-ultra-misc](../README_jp.md) の一部です。
 
-**試験中です。** `sapd-lps0` と同じく、s2idle 中に SoC がリセットされる問題が対象です。記録を見ると、ファームウェアの一番深い状態(Standby-DRIPS)の中で落ちています。
+**試験中です。作者の機体では 2026-11-24 から切ってあります。`install.sh` も、`--enable` を付けない限り切った状態で入れます。** リセットは止まりませんでした。2026-11-19 から 11-23 まで、このモジュールを入れた状態で 5 回サスペンドから戻れず、電池でふたを閉じて無事に戻れたのは約 6 回でした。それ以前(7〜10 回に 1 回ほど)より悪い成績です。ただし同じ期間に、スピーカーアンプのスリープフックと UEFI トレーサも使っていました。このモジュールが悪化させたとまでは言えません。以前の状態に戻すため、3 つをまとめて切りました。スリープ中の電力はどちらでも同じです(約 0.7 W。カーネル標準の ACPI アイドルドライバでも DRIPS に入ります)。
+
+`sapd-lps0` と同じく、s2idle 中に SoC がリセットされる問題が対象です。記録を見ると、ファームウェアの一番深い状態(Standby-DRIPS)の中で落ちています。
 
 Linux の ACPI LPI アイドルドライバは、PSCI を platform-coordinated(PC)モードのまま使います。各 CPU は一番深い状態を要求し、クラスタや SoC 全体の電源をいつ落とすかはファームウェアが決めます。
 
@@ -28,7 +30,8 @@ Windows の PEP ドライバ `nvpep.sys`(2.27)は、読み込み時に PSCI を 
 
 ```
 cd osi-idle
-sudo ./install.sh                         # DKMS。すぐ読み込み、起動時にも読み込む(/etc/modprobe.d に enable=1)
+sudo ./install.sh                         # DKMS。起動時にモジュールは読み込むが OSI は切ったまま(/etc/modprobe.d に enable=0)
+sudo ./install.sh --enable                # OSI をすぐ有効にし、起動時にも有効にする(enable=1)
 cat /sys/module/n1x_osi_idle/parameters/stats   # CPU_SUSPEND の結果: 電源断して復帰, すぐ復帰, DENIED, INVALID, その他
 grep . /sys/module/n1x_osi_idle/parameters/st_*  # 同じものを要求した状態ごとに(WFI, コア, クラスタ, パッケージ SL/LL, DRIPS)
 sudo ./drips-count                        # ファームウェアのカウンタ: DRIPS / パッケージ / クラスタの滞在時間(ns)と回数

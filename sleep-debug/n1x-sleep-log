@@ -17,6 +17,10 @@ bat=/sys/class/power_supply/BAT1
 now() { date '+%F %T'; }
 # DVFSRC enable flag in SPM SYSRAM (0x12FC00); power_wrap writes 1 at probe, tests set 0
 dvfsrc() { python3 -I -c 'import mmap,os,struct;f=os.open("/dev/mem",os.O_RDONLY|os.O_SYNC);m=mmap.mmap(f,4096,mmap.MAP_SHARED,mmap.PROT_READ,offset=0x12F000);print(struct.unpack_from("<I",m,0xC00)[0])' 2>/dev/null; }
+# wakeup sources: name event_count wakeup_count
+wsnap() { for w in /sys/class/wakeup/wakeup*; do echo "$(cat "$w/name") $(cat "$w/event_count") $(cat "$w/wakeup_count")"; done 2>/dev/null; }
+# s2idle entries per CPU, summed over the idle states
+s2snap() { for c in /sys/devices/system/cpu/cpu[0-9]*; do echo "${c##*/} $(cat "$c"/cpuidle/state*/s2idle/usage 2>/dev/null | awk '{s += $1} END {print s + 0}')"; done | sort; }
 up() { awk '{printf "%.2fh", $1/3600}' /proc/uptime; }
 
 case "$1" in
@@ -42,9 +46,18 @@ pre)
 	echo "$(date +%s) $(cat $bat/energy_now) $(cat /sys/class/power_supply/ADP1/online)" > "$estamp"
 	# IRQ counts, diffed in "post": names whatever kept waking the SoC during s2idle
 	# (2026-11-17: 3471 wake cycles at exactly 0.5 s in one 36-min sleep, source unknown).
+	# The journal cannot count the cycles of a long sleep (the kernel log buffer overruns:
+	# 2026-11-25 "Missed 74924 kernel messages"), so count s2idle entries per CPU too, and
+	# snapshot the wakeup sources. All of it is diffed in "post".
+	wsnap > /run/n1x-sleep-ws-pre
+	s2snap > /run/n1x-sleep-s2-pre
 	cat /proc/interrupts > /run/n1x-sleep-irq-pre
 	;;
 post)
+	# first of all, before this hook's own work adds interrupts
+	cat /proc/interrupts > /run/n1x-sleep-irq-post
+	s2snap > /run/n1x-sleep-s2-post
+	wsnap > /run/n1x-sleep-ws-post
 	if read -r t0 e0 ac0 < "$estamp" 2>/dev/null; then
 		t1=$(date +%s) e1=$(cat $bat/energy_now) ac1=$(cat /sys/class/power_supply/ADP1/online)
 		s2d=$(cat /sys/module/n1x_osi_idle/parameters/s2idle_depth 2>/dev/null)
@@ -67,6 +80,22 @@ post)
 		{ d = tot() - pre[$1]; if (d > 0) printf "%d %s%s\n", d, $1, name() }' /run/n1x-sleep-irq-pre /proc/interrupts |
 		sort -rn | head -6 | tr -s ' ' | paste -sd'|')
 	echo "s2idle-cycles: $cycles  irq-delta: $irqs" >> "$log"
+	# What woke the SoC inside s2idle. s2idle-entries is the real cycle count (cpu:entries,
+	# CPUs with the most first); an IRQ or wakeup source that grew by about that number is
+	# the trigger. irq-all lists every IRQ that grew, with the CPUs it fired on.
+	{
+		echo "power-post: bat=$(cat $bat/capacity 2>/dev/null)% $(cat $bat/status 2>/dev/null) ac=$(cat /sys/class/power_supply/ADP1/online 2>/dev/null)  "
+		echo "s2idle-entries: $(join /run/n1x-sleep-s2-pre /run/n1x-sleep-s2-post 2>/dev/null | awk '{d = $3 - $2; if (d > 0) print d, $1 ":" d}' | sort -rn | head -6 | cut -d' ' -f2 | paste -sd' ')"
+		echo "wakeup-src-delta: $(awk 'NR == FNR { e[$1] = $2; w[$1] = $3; next } ($2 - e[$1] > 0) { printf "%d %s:%d/%d\n", $2 - e[$1], $1, $2 - e[$1], $3 - w[$1] }' /run/n1x-sleep-ws-pre /run/n1x-sleep-ws-post 2>/dev/null | sort -rn | head -10 | cut -d' ' -f2 | paste -sd' ')"
+		awk '
+			function name(   i, n) { for (i = 2; i <= NF && $i ~ /^[0-9]+$/; i++); n = ""; for (; i <= NF; i++) n = n " " $i; return n }
+			FNR == 1 { next }
+			NR == FNR { for (i = 2; i <= NF && $i ~ /^[0-9]+$/; i++) pre[$1, i] = $i; next }
+			{ t = 0; c = ""
+			  for (i = 2; i <= NF && $i ~ /^[0-9]+$/; i++) { d = $i - pre[$1, i]; if (d > 0) { t += d; c = c " cpu" (i - 2) "=" d } }
+			  if (t > 0) printf "%d %s%s [%s ]\n", t, $1, name(), c }' /run/n1x-sleep-irq-pre /run/n1x-sleep-irq-post 2>/dev/null |
+			sort -rn | head -25 | tr -s ' ' | cut -c1-300 | sed 's/^/irq-all: /'
+	} >> "$log" 2>&1
 	echo "--- post $2 $(now) uptime=$(up) wakeup_irq=$(journalctl -k -b --no-pager -q -n 200 2>/dev/null | grep -o 'wakeup from IRQ [0-9]*' | tail -1 | awk '{print $4}') hw_sleep=$(cat /sys/power/suspend_stats/last_hw_sleep 2>/dev/null)us" >> "$log"
 	sync -f "$log"
 	;;

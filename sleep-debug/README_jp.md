@@ -19,6 +19,10 @@ pstore にも何も残りません。そこから先は RAM の中にしか無�
   メモリ、カメラ、有効な wakeup 元、サスペンド統計、上位プロセス)を `/var/log/n1x-sleep.log` に書いて sync します。
   復帰後は s2idle の起床回数、増えた IRQ、ハードウェアが眠っていた時間を書きます。バッテリー時は、寝ている間の平均電力も
   `n1x-sleep-trace.log` に残します。
+  s2idle の中で SoC を起こしているものを特定するための行も書きます(AC 接続時のスリープで、0.5 秒ごとに起きて
+  すぐ眠り直すことがあります)。`s2idle-entries` は CPU ごとの s2idle 突入回数です。長いスリープでは journal が
+  カーネルメッセージを取りこぼすので、こちらが本当の回数です。`wakeup-src-delta` はイベント数が増えた wakeup 元、
+  `irq-all` は増えた IRQ すべてと、それが入った CPU です。回数とほぼ同じだけ増えた項目がトリガーです。
 
 **トレーサは無効の状態で入ります**(`/etc/modprobe.d/n1x-sleep-trace.conf`: `options n1x_sleep_trace enable=0`)。
 作者の機械でも 2026-11-21 から無効です。1 回のサスペンドで不揮発の UEFI 変数に 10 回ほど書き、そのうち数回は DRIPS の

@@ -19,6 +19,10 @@ because everything after that is in RAM and lost with the power. Not needed to r
   GPU and its apps, memory, camera, enabled wakeup sources, suspend stats, top processes) to
   `/var/log/n1x-sleep.log` and syncs it; after resume, the s2idle wake cycles, the IRQs that grew and the
   hardware sleep time. On battery it also logs the average power while asleep to `n1x-sleep-trace.log`.
+  To name what wakes the SoC inside s2idle (some sleeps on AC wake every 0.5 s and go straight back), it also
+  writes: `s2idle-entries` (s2idle entries per CPU; the real number of cycles, since the journal loses kernel
+  messages in a long sleep), `wakeup-src-delta` (wakeup sources whose event count grew) and `irq-all` (every IRQ
+  that grew, with the CPUs it fired on). The trigger is the entry that grew by about the number of cycles.
 
 **The tracer is installed switched off** (`/etc/modprobe.d/n1x-sleep-trace.conf`: `options n1x_sleep_trace enable=0`),
 and is off on the author's machine since 2026-11-21. It writes a non-volatile UEFI variable about ten times per

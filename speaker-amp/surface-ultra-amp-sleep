@@ -6,7 +6,8 @@
 # Sound is gone for ~20-25 s after resume while the card, the DSP FW and PipeWire come back.
 # Also run by udev (61-surface-ultra-amp.rules) as "recover" when the driver finds an amp
 # DSP not running at playback start.
-# Installed by install.sh to /usr/lib/systemd/system-sleep/ (mode 755).
+# Installed by install.sh to /usr/lib/systemd/system-sleep/ (mode 755), and a second time as
+# /usr/local/sbin/surface-ultra-amp-recover for udev, so "recover" works with the hook chmod -x.
 set -u
 SELF=$(readlink -f "$0")
 DRV=/sys/bus/platform/drivers/mtk_sdw_mc

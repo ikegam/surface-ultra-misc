@@ -76,6 +76,8 @@ echo "options snd_soc_rt1320_sdw silence_detect=0" > "$OPTS"; chmod 644 "$OPTS"
 # 5. power the amps off through s2idle (sleep hook), and power-cycle them when the driver
 #    finds an amp DSP not running at playback start (udev rule -> hook "recover")
 install -D -m755 "$here/surface-ultra-amp-sleep" "$HOOK"
+# the same script again for the udev recovery, which must work with the hook switched off
+install -D -m755 "$here/surface-ultra-amp-sleep" /usr/local/sbin/surface-ultra-amp-recover
 install -D -m644 "$here/61-surface-ultra-amp.rules" "$RULES"
 udevadm control --reload
 

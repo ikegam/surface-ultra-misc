@@ -58,6 +58,9 @@ Linux はそれなしで鳴らしている。カーネルの `rt1320-sdw` には
   既知の不具合: 復帰側の処理は固定名の一時ユニットで走る。復帰から約 30 秒以内にもう一度サスペンドすると、
   ユニットがまだ残っていて(`Unit surface-ultra-amp-resume.service was already loaded`)、次のスリープの前に
   アンプが再設定されない。
+  フックを切るとアンプはスリープ中も給電されたままになる。2026-11-26 には、再生開始時に両方の DSP が動いておらず、
+  左右がずれた。udev の自動復旧はこのフックと同じファイルを実行していたので、`chmod -x` で一緒に止まっていた。
+  いまは別のコピー `/usr/local/sbin/surface-ultra-amp-recover` を実行する。
 - 再生開始時の確認があるので、スピーカーを閉じないルール([`speaker-tuning/no-suspend.sh`](../speaker-tuning/no-suspend.sh))はもう要らない。
   スピーカーはまたサスペンドしてよく、アイドル時に約 0.8 W 減る。
 - `amp-power-cycle.sh`(非常用、通常は不要)は、Windows で ACPI の `CNT0._PS3`/`_PS0` がやっているように、LDO の

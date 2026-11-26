@@ -9,7 +9,7 @@ dkms status "$PKG/$VER" | grep -q . && dkms remove "$PKG/$VER" --all
 rm -rf "/usr/src/$PKG-$VER"
 rm -f /usr/lib/firmware/updates/realtek/rt1320/rt1320_*Surface_Laptop_Ultra*.dat
 rm -f /usr/local/lib/surface-ultra-misc/speaker-amp-gain
-rm -f /usr/lib/systemd/system-sleep/surface-ultra-amp-sleep /etc/udev/rules.d/61-surface-ultra-amp.rules
+rm -f /usr/lib/systemd/system-sleep/surface-ultra-amp-sleep /usr/local/sbin/surface-ultra-amp-recover /etc/udev/rules.d/61-surface-ultra-amp.rules
 rm -f /etc/modprobe.d/n1x-rt1320-silence.conf
 udevadm control --reload
 [ -f "$UCM.orig-speaker-amp" ] && mv "$UCM.orig-speaker-amp" "$UCM"

@@ -1,3 +1,5 @@
 # Surface Laptop Ultra: the patched rt1320 driver sends this when an amp's DSP is not
 # running at playback start (seen after a long runtime suspend). Power-cycle the amps.
-ACTION=="change", SUBSYSTEM=="soundwire", ENV{RT1320_DSP}=="lost", RUN+="/usr/bin/systemd-run --no-block --collect --unit=surface-ultra-amp-recover /usr/lib/systemd/system-sleep/surface-ultra-amp-sleep recover"
+# surface-ultra-amp-recover is a second copy of the sleep hook, so that the recovery still
+# works when the hook itself is switched off (chmod -x).
+ACTION=="change", SUBSYSTEM=="soundwire", ENV{RT1320_DSP}=="lost", RUN+="/usr/bin/systemd-run --no-block --collect --unit=surface-ultra-amp-recover /usr/local/sbin/surface-ultra-amp-recover recover"

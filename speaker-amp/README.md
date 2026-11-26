@@ -59,6 +59,9 @@ This directory builds them **from your own Windows install** and changes the dri
   not shown to be the cause). Known bug: the resume step runs as a transient unit with a fixed name, so a second
   suspend within ~30 s of a resume finds the unit still loaded (`Unit surface-ultra-amp-resume.service was already
   loaded`) and the amps are not set up again before the next sleep.
+  With the hook off, the amps stay powered through sleep again, and on 2026-11-26 both DSPs were found not
+  running at playback (left/right skew). The udev recovery used to run this same file, so `chmod -x` had switched
+  it off as well; it now runs its own copy, `/usr/local/sbin/surface-ultra-amp-recover`.
 - With the playback-start check, the speaker no-suspend rule ([`speaker-tuning/no-suspend.sh`](../speaker-tuning/no-suspend.sh)) is no longer needed:
   the speakers may suspend again, which saves ~0.8 W at idle.
 - `amp-power-cycle.sh` (rescue, normally not needed) power-cycles both amps through their LDO enables, as ACPI

@@ -20,13 +20,29 @@ usr() {  # usr <uid> systemctl args...
 	timeout 10 runuser -u "$(id -nu "$uid")" -- env XDG_RUNTIME_DIR=/run/user/$uid systemctl --user "$@"
 }
 
+# PipeWire keeps running: the card's profile goes to "off" (PCMs closed, as if the card were
+# unplugged) and back to HiFi afterwards. A PipeWire restart loses the microphone in a running
+# Chromium until the browser is restarted. Only if that fails is PipeWire stopped as before.
+CARD=alsa_card.platform-mtk_sdw_mc
+profile() {  # profile <uid> <name>
+	timeout 5 runuser -u "$(id -nu "$1")" -- env XDG_RUNTIME_DIR=/run/user/$1 pactl set-card-profile $CARD "$2" 2>/dev/null
+}
+
 case "${1:-}" in
 pre)
 	U=$(users)
 	echo "$U" > /run/amp-sleep.users
+	: > /run/amp-sleep.stopped
 	for uid in $U; do
-		usr "$uid" stop pipewire.socket pipewire-pulse.socket pipewire pipewire-pulse wireplumber
+		if profile "$uid" off; then
+			log "card profile off (uid $uid)"
+		else
+			usr "$uid" stop pipewire.socket pipewire-pulse.socket pipewire pipewire-pulse wireplumber
+			echo "$uid" >> /run/amp-sleep.stopped
+			log "pactl failed, stopped PipeWire (uid $uid)"
+		fi
 	done
+	sleep 0.5
 	[ -e $DRV/mtk_sdw_mc ] && timeout 10 sh -c "echo mtk_sdw_mc > $DRV/unbind"
 	timeout 10 rmmod snd_soc_rt1320_sdw 2>/dev/null
 	gpioset -z -C $HOLD -c gpiochip0 47=0 74=0
@@ -50,6 +66,10 @@ resume)
 	# amps run the DSP FW (or give up after 60 s and run without it).
 	for i in $(seq 60); do
 		sleep 1
+		# the card is new to PipeWire; keep it closed until the DSP FW runs
+		for uid in $(cat /run/amp-sleep.users 2>/dev/null); do
+			grep -qx "$uid" /run/amp-sleep.stopped 2>/dev/null || profile "$uid" off
+		done
 		n=0
 		for a in 1 2; do
 			amixer -c mt8901soundwire cget name="rt1320-$a DSP FW Update" 2>/dev/null |
@@ -59,6 +79,10 @@ resume)
 	done
 	log "DSP FW on $n/2 amps after ${i} s"
 	for uid in $(cat /run/amp-sleep.users 2>/dev/null); do
+		if ! grep -qx "$uid" /run/amp-sleep.stopped 2>/dev/null; then
+			profile "$uid" HiFi || log "!! could not set the card profile back to HiFi (uid $uid)"
+			continue
+		fi
 		usr "$uid" start pipewire.socket pipewire-pulse.socket wireplumber pipewire pipewire-pulse
 		for unit in xdg-desktop-portal-hyprland xdg-desktop-portal; do
 			usr "$uid" -q is-active $unit && usr "$uid" restart $unit
